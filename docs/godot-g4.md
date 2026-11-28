@@ -13153,10 +13153,11 @@ gửi lại cho ai.
 > export web exit 0 (pck `e1030f47`, trùng byte bản export 19:05 —
 > export xác định). **Chưa kiểm chứng bằng trình duyệt thật** — thay
 > đổi server-side, test headless đã dùng socket + server thật.
-> **Push main V100 đã chuẩn bị xong (5 file, sync-base đã verify) —
-> chạy ở vòng này; commit SHA ghi thêm vào mục 121.4 sau khi push
-> xong.** Deploy pck `e1030f47` lên gh-pages vẫn CHƯA CHẠY — chờ
-> chủ nói 'đẩy tiếp' (live vẫn `5f2a052f` r41).
+> **Push main V100 — XONG, commit
+> `900d5188896149d415c89df66e483d0f7b161465`** (5 file, thẻ duyệt
+> đã duyệt, đã verify bằng `list_commits`, sync record đã ghi —
+> 467 entries). Deploy pck `e1030f47` lên gh-pages vẫn CHƯA CHẠY
+> — chờ chủ nói 'đẩy tiếp' (live vẫn `5f2a052f` r41).
 
 ### 121.1 Chẩn đoán — XONG (giới hạn đã ghi ở §105.2)
 
@@ -13274,8 +13275,13 @@ cancel: người gửi không nhận được `trade_declined` /
 - Push 5 file: `src/godot/server/pxb_server.gd`,
   `src/godot/tests/g4_r100_trade_completed_rebind_test.gd`,
   `src/godot/tests/g4_r100_trade_completed_rebind_test.gd.uid`,
-  `docs/godot-g4.md`, `docs/roles-qc.md`. Commit SHA ghi thêm
-  vào mục này sau khi push xong (thẻ duyệt + `list_commits`).
+  `docs/godot-g4.md`, `docs/roles-qc.md` — **XONG, commit
+  `900d5188896149d415c89df66e483d0f7b161465`** trên main,
+  2026-11-28T13:05:27Z, đã verify bằng `list_commits`. Sync
+  record `pho-xo-bo.muse-github-snapshot-sync.json` đã ghi entry
+  mới (467 entries). (Ghi chú: dòng commit SHA này chỉ có trong
+  doc local — doc đã push ghi 'chuẩn bị xong'; SHA sẽ theo lên
+  remote ở lần push docs sau, như mẫu vòng trước.)
 - Deploy pck `e1030f47` lên gh-pages vẫn CHƯA CHẠY — chờ chủ
   nói 'đẩy tiếp'. Live vẫn r41 pck `5f2a052f`; local đã tới
   r100 (lệch 59 vòng).
@@ -13296,3 +13302,134 @@ cancel: người gửi không nhận được `trade_declined` /
    (cùng gốc với `pxb_server.gd` ở §121.5) — vòng sau kiểm tra
    từng file rồi đẩy phần đổi của nó lên main, không để tích lũy
    âm thầm nữa.
+
+## 122. Vòng 101 — auction_closed tới tay người offline + đẩy file server tích lũy (28/11 ~20:45–21:30)
+
+### 122.1 Chẩn đoán — giới hạn đã ghi ở §105.2
+
+- `_close_expired_auctions` chỉ `_broadcast(closed_msg)` — broadcast chỉ tới
+  người đang online. Người bán / người thắng đang offline lúc phiên đóng
+  thì KHÔNG BAO GIỜ nhận được `auction_closed` (chỉ có auction_log persist,
+  không gửi lại) — cùng họ lỗi với trade_completed trước vòng 100 (§121).
+  Hậu quả: tiền/món đã quyết toán ở sổ cái server nhưng túi/ví local của
+  người offline không áp (client chỉ áp khi nhận auction_closed —
+  xem PxbOnline.apply_auction_closed).
+- Client đã đủ điều kiện nhận lại: `apply_auction_closed` chống áp trùng
+  bằng `ws_auctions_applied` (giữ 50 id) + `_rebaseline_ledger_after_settlement`
+  sau khi áp — gửi lại đúng 1 lần là an toàn, không cần sửa client.
+- Chủ chốt trần bonus chỉ số phụ (ghi ở §121.6): KHÔNG kẹp STAT_MAX —
+  code đã đúng từ vòng 87 (apply_stat_gain không kẹp); vòng này chỉ ghi
+  quyết định vào comment `scripts/pxb_stats.gd`.
+
+### 122.2 Sửa — server `server/pxb_server.gd` (không sửa Main, không sửa client)
+
+- `var _auction_pending: Dictionary = {}` + `const AUCTION_PENDING_MAX := 10`
+  (player_id -> Array message auction_closed; mẫu `_trade_pending` vòng 100).
+- `_send_auction_closed_notice(player_id, peer, msg)`: online thì gửi ngay,
+  offline thì xếp hàng đợi (cap 10/người, deep duplicate, `_mark_state_dirty`).
+- `_flush_auction_pending(peer_id, player_id)`: gửi lại lúc hello sau, xóa
+  khỏi hàng đợi; gọi trong `_rebind_after_hello` ngay sau `_flush_trade_pending`.
+- `_close_expired_auctions`: sau `_broadcast(closed_msg)`, với người bán và
+  người thắng (khác người bán, có người thắng): nếu `_find_peer_by_player_id`
+  == -1 thì `_send_auction_closed_notice(id, -1, closed_msg)`. Không gửi lặp
+  từ auction_log (lý do như trade ở §121: ws_auctions_applied chỉ giữ 50 id).
+- `_clean_auction_pending(raw)`: type phải là "auction_closed", auction_id
+  + seller_player_id không rỗng; cap 10, giữ thứ tự.
+- `save_state()` thêm `"auction_pending"`; `load_state()` nạp qua cleaner
+  (file v100 cũ không có khóa này vẫn nạp được); `data()` thêm
+  `"auction_undelivered": _auction_pending.size()`.
+- `scripts/pxb_stats.gd`: comment đầu file ghi quyết định chủ chốt 28/11 —
+  bonus chỉ số phụ KHÔNG có trần (không kẹp STAT_MAX, không giới hạn).
+
+### 122.3 Test mới + hồi quy — XONG
+
+- Test mới `tests/g4_r101_auction_pending_test.gd` (kèm `.uid`, cổng
+  18900–18904, state `/tmp/pxb-r101-state.json`, 7 phase, socket + server
+  thật, client A/B có túi/ví thật): **63/63 PASS ngay lần chạy sạch**
+  (sau 2 lần sửa TEST, không sửa code server sau lần chạy đầu — xem 122.3b).
+  (a) Unit cleaner: giữ đủ, lọc sai (sai type / thiếu auction_id /
+  thiếu seller), cap 10, giữ thứ tự; (b) B thắng phiên khi A offline:
+  B nhận closed ngay + áp đúng (trả 1.000.000, nhận com-tam x1),
+  server xếp closed vào hàng đợi cho A (`auction_undelivered` = 1);
+  (c) hàng đợi persist qua restart: stop → state file giữ
+  `auction_pending` (player-a 1 thông báo `auction_closed` #1) →
+  restart cổng mới → `auction_undelivered` vẫn 1, `auction_log` vẫn 1;
+  (d) A hello lại nhận đúng 1 lần, áp đúng vai người bán (com-tam về 0,
+  nhận 950.000 = trừ phí 5%), không trùng sau 1,5s,
+  `auction_undelivered` về 0; (e) phiên không ai đấu giá đóng lúc cả
+  hai offline: chỉ xếp cho người bán, A hello lại nhận 1 lần, không áp
+  (lý do `khong-co-nguoi-thang`), giữ ao-mua x1 + 950.000;
+  (f) file cũ (không có `auction_pending`) nạp được: `auction_pending`
+  rỗng, `auction_log` vẫn 2 phiên.
+- **Hồi quy đầy đủ: 5486 check, 0 FAIL** (lần sạch thứ 20;
+  +63 so với v100 = test mới r101; r100 77/77, G1 419/419, G3 95/95,
+  G1 playtest 14/14, không regression). Log
+  `hidden_files/regression-2026-11-28-2045-v101.log`.
+
+#### 122.3b Ba lỗi TEST (không phải lỗi code server) — ghi để không tái phạm
+
+1. **B hello lại không thấy phiên mở:** test chờ `_cb.ws_auctions`
+   non-empty sau restart — nhưng server KHÔNG gửi lại phiên đang mở lúc
+   hello (thiết kế vòng 83: client tự xin `auction_list`). Sửa test:
+   gọi `request_ws_auction_list()` sau khi B nối lại.
+2. **Nhãn step trùng trong `match`:** phase 2 có hai nhánh `3:` — nhánh
+   kiểm tra đặt `_step = 3` nên chạy lại chính nó mỗi frame (23.109 check
+   lặp) và không bao giờ tới nhánh chờ. Sửa: kiểm tra → `_step = 4`,
+   nhánh chờ đổi thành `4:`.
+3. **White-box đổi `ends_at_ms` làm hỏng mục log:** test đổi
+   `ends_at_ms` về quá khứ để kích đóng phiên — mục `auction_log` lưu
+   lại mang `ends <= created` nên cleaner (đúng luật) loại bỏ khi nạp
+   file sau restart (`auction_log` về 0). Trong thật `ends = created +
+   duration` nên không bao giờ xảy ra — KHÔNG sửa cleaner. Sửa test:
+   trả lại `ends_at_ms = created + 30000` cho mục log ngay sau khi
+   phiên đóng (cả 2 phiên), trước khi stop server.
+
+### 122.4 Export — pck mới `9cbd27f8`
+
+- `--check-only` 3 file sửa/mới exit 0; `--headless --import` exit 0;
+  scene Main 120 frame exit 0, 0 ERROR/warning.
+- Export web exit 0: pck **28.135.896 byte, SHA-256 `9cbd27f8…`**
+  (trước `e1030f47…`, +14.772 byte do code server V101 + test r101),
+  wasm không đổi `fc74679e…`, `GODOT_THREADS_ENABLED = false`;
+  HTTP 200 đủ 4 file (cổng 8202).
+- Không browser-verify (thay đổi server-side; test headless đã dùng
+  socket + server thật, như vòng 100).
+
+### 122.5 Push main V101 + file server tích lũy — CHUẨN BỊ XONG, CHẠY Ở VÒNG NÀY
+
+- Sync-base verify ở vòng này (head vẫn `900d5188`):
+  `pxb_server.gd` — remote là bản V100 vừa đẩy (head `900d5188`), local
+  chỉ thêm đổi V101 (không xung đột); `pxb_stats.gd` — remote là bản
+  trước vòng 87 (chưa có stat_bonus), local = remote + toàn bộ V87 +
+  ghi chú V101 (chỉ thêm mới, không xung đột); `server_main.gd` —
+  remote là bản trước vòng 82 (chưa có `--state-file`), local = remote
+  + nối persistence V82 (chỉ thêm mới, không xung đột); test r101 +
+  `.uid` vắng mặt trên remote (mới hoàn toàn); docs chỉ đổi ở phần
+  V101 (§122 + mục V101 roles-qc).
+- **Đính chính ghi chú vòng 100 (§121.5): `scripts/pxb_online.gd`
+  KHÔNG cần đẩy** — đối chiếu byte remote vs local: giống hệt nhau
+  (134.826 byte, 2.964 dòng, blob SHA `5b1dfa51…`); file này đã lên
+  remote ở commit `2693458c` (vòng 93), không tích lũy từ 20/11 như
+  vòng 100 đã ghi. Chỉ `server_main.gd` là thật sự tích lũy.
+- Push 7 file: `src/godot/server/pxb_server.gd`,
+  `src/godot/server/server_main.gd`, `src/godot/scripts/pxb_stats.gd`,
+  `src/godot/tests/g4_r101_auction_pending_test.gd`,
+  `src/godot/tests/g4_r101_auction_pending_test.gd.uid`,
+  `docs/godot-g4.md`, `docs/roles-qc.md` — **CHẠY Ở VÒNG NÀY**
+  (SHA sẽ theo lên remote ở lần push docs sau, như mẫu vòng trước).
+- Deploy pck `9cbd27f8` lên gh-pages vẫn CHƯA CHẠY — chờ chủ nói
+  'đẩy tiếp'. Live vẫn r41 pck `5f2a052f`; local đã tới r101 (lệch 60 vòng).
+
+### 122.6 Việc tiếp theo — Vòng 102
+
+1. Deploy pck `9cbd27f8` lên gh-pages — CHƯA CHẠY, deploy vẫn chờ chủ nói
+   "đẩy tiếp". Live vẫn r41 pck `5f2a052f`; local đã tới r101 (lệch 60 vòng).
+2. G4 online thật: server `.NET 8` vẫn chưa build/chạy được trên VM
+   (không có dotnet SDK) — quyết dùng Godot headless dedicated server
+   thay .NET hay chờ máy có dotnet (xem `docs/opensource-engine.md` §3.4).
+   Server Godot nay đã đủ trade/auction/shop/chat/persistence — quyết
+   này càng lúc càng gần.
+3. Polish G4 §1.4 còn lại: camera zoom trận, tile riêng Map003–018
+   (đang PROVISIONAL), hiệu ứng đánh/ngã sạp; animation di chuyển/đánh
+   trong trận MarketBattle (đấu sĩ nhảy ô tức thì); chọn đội/vũ khí
+   trước trận; lưu giữ sạp + Danh vọng vào save.

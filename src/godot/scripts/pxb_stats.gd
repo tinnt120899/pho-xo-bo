@@ -11,6 +11,15 @@ extends Node
 ##   PxbBalance.TOTAL_STAT_CAP (300, PROVISIONAL).
 ## - Train = đánh đổi: tăng 1 chỉ số phải giảm 1 chỉ số khác cùng lượng.
 ## - Tiền / Danh vọng / EXP là tài nguyên, KHÔNG phải chỉ số gốc.
+## - Vòng 87 (G4): bonus chỉ số phụ (stat_bonus) — khóa ngắn hạn tốt
+##   nghiệp +10 một chỉ số phụ (GDD Mục 5) nhưng 4 chỉ số trộn là hàm
+##   tính sẵn, không set được (khoảng trống G2 §6 phần 3). Nay
+##   apply_stat_gain() cộng bonus vào đúng chỉ số phụ đó, không động
+##   tới 3 gốc, không phá trần tổng (total() chỉ cộng 3 gốc).
+##   Bonus KHÔNG kẹp ở STAT_MAX: phần thưởng cộng trên giá trị trộn
+##   (đã trả phí học thì phải thấy +10, kể cả khi trộn đã 100) —
+##   Chủ chốt 28/11 (vòng 101): KHÔNG có trần bonus — bonus cộng
+##   không giới hạn trên giá trị trộn (apply_stat_gain không kẹp).
 ##
 ## Lưu: khi làm save (G2 bước Online/SaveCloud), data() ({the, tri, tam})
 ## là dữ liệu thuần để lưu; from_data() khôi phục lại.
@@ -21,6 +30,9 @@ extends Node
 ## khi tổng khởi đầu khác trần, thay vì throw.
 
 const BASE_KEYS := ["the", "tri", "tam"] # Thể (Đỏ), Trí (Xanh), Tâm (Vàng)
+const SUB_STATS := ["ky", "dung", "sang", "an-yen"] # 4 chỉ số phụ (chỉ số trộn).
+
+var stat_bonus: Dictionary = {} # Vòng 87: +chỉ số phụ tích lũy từ khóa ngắn hạn, vd {"sang": 10}.
 
 var the: int = 100:
 	set(v):
@@ -37,25 +49,51 @@ func total() -> int:
 	return the + tri + tam
 
 
-# Chỉ số trộn = trung bình 2 gốc (làm tròn xuống) — như Stats.cs.
+# Chỉ số trộn = trung bình 2 gốc (làm tròn xuống) — như Stats.cs —
+# cộng bonus khóa ngắn hạn (Vòng 87, không kẹp STAT_MAX).
 func ky() -> int:
-	return (the + tri) / 2 # Tím — Kỷ
+	return (the + tri) / 2 + int(stat_bonus.get("ky", 0)) # Tím — Kỷ
 
 
 func dung() -> int:
-	return (the + tam) / 2 # Cam — Dũng
+	return (the + tam) / 2 + int(stat_bonus.get("dung", 0)) # Cam — Dũng
 
 
 func sang() -> int:
-	return (tri + tam) / 2 # Lục — Sáng
+	return (tri + tam) / 2 + int(stat_bonus.get("sang", 0)) # Lục — Sáng
 
 
 # Trắng — An Yên, chỉ khi 3 gốc cân bằng trong ngưỡng PROVISIONAL ±10.
+# Bonus vẫn cộng cả khi lệch (gốc 0 + bonus): đã trả phí học thì +10
+# phải thấy được, không im lặng mất.
 func an_yen() -> int:
 	var tol := PxbBalance.AN_YEN_BALANCE_TOLERANCE
 	if absi(the - tri) <= tol and absi(tri - tam) <= tol:
-		return (the + tri + tam) / 3
+		return (the + tri + tam) / 3 + int(stat_bonus.get("an-yen", 0))
+	return int(stat_bonus.get("an-yen", 0))
+
+
+# Đọc 1 chỉ số phụ theo khóa ("ky"/"dung"/"sang"/"an-yen"); khóa lạ → 0.
+func sub_stat(key: String) -> int:
+	match key:
+		"ky":
+			return ky()
+		"dung":
+			return dung()
+		"sang":
+			return sang()
+		"an-yen":
+			return an_yen()
 	return 0
+
+
+# Vòng 87: áp +gain vào 1 chỉ số phụ (khóa ngắn hạn tốt nghiệp).
+# Trả false + không đổi gì khi khóa lạ hoặc gain <= 0.
+func apply_stat_gain(sub: String, gain: int) -> bool:
+	if sub not in SUB_STATS or gain <= 0:
+		return false
+	stat_bonus[sub] = int(stat_bonus.get(sub, 0)) + gain
+	return true
 
 
 func get_stat(key: String) -> int:
@@ -95,9 +133,9 @@ func train(up: String, down: String, amount: int) -> bool:
 	return true
 
 
-# Dữ liệu thuần để lưu ({the, tri, tam}).
+# Dữ liệu thuần để lưu ({the, tri, tam} + bonus chỉ số phụ Vòng 87).
 func data() -> Dictionary:
-	return {"the": the, "tri": tri, "tam": tam}
+	return {"the": the, "tri": tri, "tam": tam, "stat_bonus": stat_bonus.duplicate()}
 
 
 # Tạo bộ chỉ số mới. Tổng khởi đầu PHẢI bằng trần tổng (gacha chỉ đổi
@@ -124,9 +162,14 @@ static func with_values(p_the: int, p_tri: int, p_tam: int) -> PxbStats:
 	return s
 
 
-# Khôi phục từ dữ liệu save (kẹp lại 0..100 cho an toàn).
+# Khôi phục từ dữ liệu save (kẹp lại 0..100 cho an toàn; bonus chỉ
+# bỏ khóa lạ / số âm — save cũ không có khóa này thì bonus rỗng).
 static func from_data(d: Dictionary) -> PxbStats:
-	return with_values(int(d.get("the", 0)), int(d.get("tri", 0)), int(d.get("tam", 0)))
+	var s := with_values(int(d.get("the", 0)), int(d.get("tri", 0)), int(d.get("tam", 0)))
+	for k in (d.get("stat_bonus", {}) as Dictionary):
+		if String(k) in SUB_STATS:
+			s.stat_bonus[String(k)] = maxi(int((d["stat_bonus"] as Dictionary)[k]), 0)
+	return s
 
 
 # Phân bổ khởi đầu mặc định khi new game mà event chưa gacha:

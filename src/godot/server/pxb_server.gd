@@ -342,8 +342,9 @@ const DAY_LENGTH_MS := 1800000
 # su giao dich / dau gia / mua cho; entry nao sai thi bo entry do,
 # giu phan dung (xem cac cleaner log). Phien dau gia het han
 # trong luc server sap duoc dong + quyet toan o lan poll dau sau
-# restart, nhung auction_closed khong toi duoc tay nguoi choi
-# dang offline (chi log persist, khong gui lai).
+# restart — vong 101: auction_closed CON toi duoc tay nguoi choi
+# dang offline (hang doi _auction_pending, mau _trade_pending
+# vong 100: gui lai luc hello sau, persist qua restart).
 const STATE_VERSION := 1
 const STATE_FILE_DEFAULT := "user://pxb_server_state.json"
 const STATE_AUTOSAVE_MS := 5000
@@ -388,7 +389,9 @@ signal trade_cancelled(trade_id: String, reason: String)
 signal auction_created(auction: Dictionary)
 ## Phát khi 1 giá đấu đã đặt (đã broadcast cho mọi người).
 signal auction_bid_placed(auction: Dictionary)
-## Phát khi 1 phiên đấu giá đã đóng (hết giờ — đã broadcast).
+## Phát khi 1 phiên đấu giá đã đóng (hết giờ — đã broadcast cho
+## người online + xếp hàng đợi cho người bán / người thắng đang
+## offline, vòng 101).
 signal auction_closed(auction: Dictionary)
 ## Phát khi 1 phiên đấu giá bị hủy (người bán hủy / người bán mất
 ## kết nối khi chưa có ai đấu giá).
@@ -421,6 +424,16 @@ var _trade_seq: int = 0
 ## Toi da 10 thong bao / nguoi choi, cu nhat bi day ra.
 const TRADE_PENDING_MAX := 10
 var _trade_pending: Dictionary = {}
+## Vong 101: thong bao auction_closed chua giao duoc vi nguoi ban
+## / nguoi thang dang offline luc phien dong (broadcast chi toi
+## nguoi dang online): player_id -> Array cac message dict
+## (auction_closed) de gui lai luc hello sau. PERSIST qua restart
+## (luu trong state file, xem save/load_state + _clean_auction_pending)
+## — phien da chot luc ben kia offline van toi tay du server restart
+## truoc khi ben do hello lai. Toi da 10 thong bao / nguoi choi,
+## cu nhat bi day ra (giong _trade_pending vong 100).
+const AUCTION_PENDING_MAX := 10
+var _auction_pending: Dictionary = {}
 ## auction_id -> {auction_id, seller_peer, seller_player_id,
 ## item_id, start_price, current_bid, current_bidder_player_id,
 ## created_at_ms, ends_at_ms}. Tối đa 1 phiên đang mở cho mỗi
@@ -550,6 +563,7 @@ func save_state() -> Dictionary:
 		"auction_log": auction_log.duplicate(true),
 		"shop_log": shop_log.duplicate(true),
 		"trade_pending": _trade_pending.duplicate(true),
+		"auction_pending": _auction_pending.duplicate(true),
 	}
 	var text := JSON.stringify(state)
 	if text.is_empty():
@@ -694,6 +708,18 @@ func load_state() -> Dictionary:
 			var cleaned_p := _clean_trade_pending((raw_pending as Dictionary)[pid])
 			if not cleaned_p.is_empty():
 				new_pending[String(pid)] = cleaned_p
+	# Vong 101: nap hang doi thong bao auction_closed chua giao
+	# (auction_pending) — khoa cu khong co thi khoi dong sach
+	# (file v100 cu van nap duoc). Entry nao sai thi bo entry do.
+	var new_auction_pending := {}
+	var raw_apending: Variant = raw.get("auction_pending", {})
+	if raw_apending is Dictionary:
+		for pid in (raw_apending as Dictionary).keys():
+			if new_auction_pending.size() >= MAX_PLAYERS:
+				break
+			var cleaned_ap := _clean_auction_pending((raw_apending as Dictionary)[pid])
+			if not cleaned_ap.is_empty():
+				new_auction_pending[String(pid)] = cleaned_ap
 	_server_day_base = int(base_raw)
 	_server_day_started_ms = int(started_raw)
 	ledger = new_ledger
@@ -705,6 +731,7 @@ func load_state() -> Dictionary:
 	auction_log = new_auction_log
 	shop_log = new_shop_log
 	_trade_pending = new_pending
+	_auction_pending = new_auction_pending
 	_state_dirty = false
 	_state_last_save_ms = _now_ms()
 	return {"ok": true, "loaded": true, "path": path}
@@ -850,6 +877,31 @@ func _clean_trade_pending(raw: Variant) -> Array:
 			if String(m.get("from_player_id", "")).strip_edges().is_empty() \
 					or String(m.get("to_player_id", "")).strip_edges().is_empty():
 				continue
+		out.append(m.duplicate(true))
+	return out
+
+
+# Vong 101: loc 1 danh sach thong bao auction_closed cho giao
+# luc hello sau (tra [] neu sai — bo ca danh sach): moi muc la
+# Dictionary type "auction_closed", auction_id khong rong,
+# seller_player_id khong rong; cap AUCTION_PENDING_MAX / nguoi,
+# giu nguyen thu tu (moi nhat o cuoi).
+func _clean_auction_pending(raw: Variant) -> Array:
+	if not (raw is Array):
+		return []
+	var out: Array = []
+	for item in raw:
+		if out.size() >= AUCTION_PENDING_MAX:
+			break
+		if not (item is Dictionary):
+			continue
+		var m: Dictionary = item
+		if String(m.get("type", "")) != "auction_closed":
+			continue
+		if String(m.get("auction_id", "")).strip_edges().is_empty():
+			continue
+		if String(m.get("seller_player_id", "")).strip_edges().is_empty():
+			continue
 		out.append(m.duplicate(true))
 	return out
 
@@ -1194,6 +1246,7 @@ func data() -> Dictionary:
 		"trade_pending": trades.size(),
 		"trade_completed_count": trade_log.size(),
 		"trade_undelivered": _trade_pending.size(),
+		"auction_undelivered": _auction_pending.size(),
 		"auction_open": auctions.size(),
 		"auction_closed_count": auction_log.size(),
 		"shop_buy_count": shop_log.size(),
@@ -1354,10 +1407,13 @@ func _handle_day_sync(from_peer: int, _msg: Dictionary) -> void:
 # dat -1). Nguoi vua vao nhan lai: de nghi dang cho minh tra loi
 # (trade_offer) / de nghi minh da gui (trade_offered) + lich su
 # chat gan day (chat_history, client cu bo qua vi khong biet
-# type nay — xem PxbOnline._handle_ws_message). Auction khong
-# gui lai o day — client tu xin auction_list khi can. Chi gui
-# cho nguoi vua hello, khong broadcast. Vong 100: them gui lai
-# thong bao trade con no (_trade_pending, da persist qua restart).
+# type nay — xem PxbOnline._handle_ws_message). Phien dau gia dang
+# mo khong gui lai o day — client tu xin auction_list khi can
+# (chi rebind seller_peer). Chi gui cho nguoi vua hello, khong
+# broadcast. Vong 100: them gui lai thong bao trade con no
+# (_trade_pending, da persist qua restart). Vong 101: them gui lai
+# thong bao auction_closed con no (_auction_pending — phien da
+# chot luc nguoi ban / nguoi thang offline).
 func _rebind_after_hello(peer_id: int, player_id: String) -> void:
 	for tid in trades.keys():
 		var t: Dictionary = trades[tid]
@@ -1391,11 +1447,14 @@ func _rebind_after_hello(peer_id: int, player_id: String) -> void:
 		_send_to(peer_id, {"type": "chat_history",
 			"messages": chat_log.duplicate(true)})
 	_flush_trade_pending(peer_id, player_id)
+	_flush_auction_pending(peer_id, player_id)
 	# Vong 100: hang doi _trade_pending da persist trong state
 	# file nen restart khong mat — chi can flush o day, khong
 	# gui lap trade_completed tu trade_log (gui lap co nguy co
 	# ap trung khi client da ap roi, vi ws_trades_applied chi
-	# giu 50 id gan nhat).
+	# giu 50 id gan nhat). Vong 101: hang doi _auction_pending
+	# cung vay — khong gui lap auction_closed tu auction_log
+	# (ws_auctions_applied cung chi giu 50 id gan nhat).
 
 
 # Tìm peer_id đã đăng ký theo player_id; -1 = không có ai đó.
@@ -1433,6 +1492,38 @@ func _flush_trade_pending(peer_id: int, player_id: String) -> void:
 		return
 	var queued: Array = _trade_pending[player_id]
 	_trade_pending.erase(player_id)
+	for m in queued:
+		if m is Dictionary:
+			_send_to(peer_id, m)
+
+
+# Vong 101: gui 1 thong bao auction_closed cho 1 nguoi choi —
+# neu dang online thi gui ngay, neu offline thi xep vao hang doi
+# _auction_pending de gui lai luc hello sau (xem
+# _rebind_after_hello). Khong gui vao peer -1 / peer chua dang ky:
+# truoc day broadcast chi toi nguoi online, ben offline khong bao
+# gio nhan duoc auction_closed du phien da chot o server.
+func _send_auction_closed_notice(player_id: String, peer: int, msg: Dictionary) -> void:
+	if peer > 0 and players.has(peer):
+		_send_to(peer, msg)
+		return
+	if player_id.is_empty():
+		return
+	var queued: Array = _auction_pending.get(player_id, [])
+	queued.append(msg.duplicate(true))
+	while queued.size() > AUCTION_PENDING_MAX:
+		queued.pop_front()
+	_auction_pending[player_id] = queued
+	_mark_state_dirty()
+
+
+# Vong 101: gui lai cac thong bao auction_closed con no cho
+# nguoi vua hello lai (hang doi RAM _auction_pending).
+func _flush_auction_pending(peer_id: int, player_id: String) -> void:
+	if not _auction_pending.has(player_id):
+		return
+	var queued: Array = _auction_pending[player_id]
+	_auction_pending.erase(player_id)
 	for m in queued:
 		if m is Dictionary:
 			_send_to(peer_id, m)
@@ -2616,6 +2707,17 @@ func _close_expired_auctions() -> void:
 		var closed_msg := {"type": "auction_closed"}
 		closed_msg.merge(closed)
 		_broadcast(closed_msg)
+		# Vong 101: broadcast chi toi nguoi dang online — nguoi
+		# ban / nguoi thang dang offline thi xep ban sao vao hang
+		# doi _auction_pending de gui lai luc hello sau (mau
+		# _trade_pending vong 100). Khong gui lap tu auction_log
+		# (client ap trung neu da ap — xem _rebind_after_hello).
+		var seller_id := String(auction.get("seller_player_id", ""))
+		if not seller_id.is_empty() and _find_peer_by_player_id(seller_id) == -1:
+			_send_auction_closed_notice(seller_id, -1, closed_msg)
+		if not winner.is_empty() and winner != seller_id \
+				and _find_peer_by_player_id(winner) == -1:
+			_send_auction_closed_notice(winner, -1, closed_msg)
 		auction_closed.emit(closed)
 
 
