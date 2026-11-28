@@ -13113,7 +13113,7 @@ gửi lại cho ai.
   0 console error / 0 pageerror / 0 failed request (62 bước).
   Ảnh 155–167 r99 + `console-r99.json` + `holds-r99.json`.
 
-### 120.5 Push main gộp r98+r99 — ĐANG CHẠY
+### 120.5 Push main gộp r98+r99 — XONG, commit `9b0864ece`
 
 - Sync-base verify lại ở vòng này (head vẫn `8a767aef`):
   battle_scene.gd chỉ khác phần thêm `refresh_last_action()`;
@@ -13121,7 +13121,14 @@ gửi lại cho ai.
   khác mục V98; 4 file test mới (g4_r98 + g4_r99, .gd) vắng mặt trên
   remote; godot-g4.md không fetch được nguyên file do quá lớn
   (output bị giữ lại) nhưng head không đổi nên không có divergence
-  từ writer khác. Manifest gộp: 8 file (xem §120.5 sau khi có SHA).
+  từ writer khác.
+- `push-files` 8 file, thẻ duyệt ĐÃ DUYỆT (khác 2 lần r98 hết hạn):
+  commit **`9b0864ece048e1baa21e151a4fe9fc079a3fc2c4`** trên main,
+  2026-11-28T11:45:22Z, đã verify bằng `list_commits`. Sync record
+  `pho-xo-bo.muse-github-snapshot-sync.json` đã ghi entry mới
+  (466 entries).
+- Deploy pck `d3ed027f` lên gh-pages vẫn CHƯA CHẠY — chờ chủ nói
+  "đẩy tiếp". Live vẫn r41 pck `5f2a052f`; local đã tới r99.
 
 ### 120.6 Việc tiếp theo — Vòng 100
 
@@ -13131,3 +13138,161 @@ gửi lại cho ai.
 2. Deploy pck `d3ed027f` lên gh-pages — CHƯA CHẠY, deploy vẫn chờ
    chủ nói "đẩy tiếp". Live vẫn r41 pck `5f2a052f`; local đã tới
    r99 (lệch 58 vòng).
+
+## §121 — Vòng 100: trade_completed tới tay người gửi dù accept lúc offline + persist hàng đợi — XONG (28/11 ~18:45–20:15 +07, cron 18:45 + 19:45)
+
+> **Kết luận: VÒNG 100 XONG (mức headless).** Server nay có hàng đợi
+> `_trade_pending`: bên nào đang offline lúc bên kia accept/decline/
+> cancel thì thông báo (trade_completed / trade_declined /
+> trade_cancelled) được xếp hàng đợi thay vì gửi vào peer -1 rồi rơi
+> mất — người gửi hello lại là nhận đúng 1 lần, không trùng. Hàng
+> đợi persist trong state file nên restart server trước khi bên đó
+> hello lại cũng không mất. Test mới **77/77 PASS** (socket +
+> server thật, 2 client A/B, restart thật 2 lần). Hồi quy **5423
+> check, 0 FAIL** (lần sạch thứ 19). Scene chạy 120 frame exit 0,
+> export web exit 0 (pck `e1030f47`, trùng byte bản export 19:05 —
+> export xác định). **Chưa kiểm chứng bằng trình duyệt thật** — thay
+> đổi server-side, test headless đã dùng socket + server thật.
+> **Push main V100 đã chuẩn bị xong (5 file, sync-base đã verify) —
+> chạy ở vòng này; commit SHA ghi thêm vào mục 121.4 sau khi push
+> xong.** Deploy pck `e1030f47` lên gh-pages vẫn CHƯA CHẠY — chờ
+> chủ nói 'đẩy tiếp' (live vẫn `5f2a052f` r41).
+
+### 121.1 Chẩn đoán — XONG (giới hạn đã ghi ở §105.2)
+
+Giới hạn đã ghi ở §105.2: trade/auction tham chiếu peer (số socket,
+đổi sau mỗi lần nối lại) nên chỉ lưu file thôi là chưa đủ, phải
+rebind theo `player_id` — V83 đã rebind trade/auction đang CHỜ
+nhưng chưa xử lý trade đã CHỐT: `_handle_trade_accept` (và
+`_handle_trade_decline` / `_handle_trade_cancel`) gửi thẳng vào
+`from_peer` / `to_peer` đã lưu trong trade. Kịch bản lỗi thật: A
+gửi đề nghị cho B rồi mất kết nối (chưa hello lại sau restart);
+B accept → server quyết toán từ sổ cái + ghi trade_log + gửi
+`trade_completed` cho cả 2 bên — nhưng `_send_to(-1)` làm rơi gói
+gửi cho A (peer -1 = chưa đăng ký). Giao dịch đã chốt ở server,
+tiền/món đã chuyển, nhưng A không bao giờ biết: ví/túi local của
+A lệch khỏi ledger server cho tới lần `ledger_sync` sau, và A
+không nhận được thông báo hoàn tất. Tương tự ở đường decline/
+cancel: người gửi không nhận được `trade_declined` /
+`trade_cancelled`.
+
+### 121.2 Sửa — server `server/pxb_server.gd` (không sửa Main, không sửa client)
+
+- `_trade_pending: Dictionary` (mới): `player_id` → Array các
+  message dict (`trade_completed` / `trade_declined` /
+  `trade_cancelled`) chưa giao được vì bên kia đang offline.
+  `TRADE_PENDING_MAX := 10` thông báo / người chơi, cũ nhất bị
+  đẩy ra (hàng đợi có chặn, không phình vô hạn).
+- `_send_trade_notice(player_id, peer, msg)` (mới, 3 chỗ gọi:
+  accept / decline / cancel): peer > 0 và còn trong `players`
+  thì gửi ngay; ngược lại xếp vào `_trade_pending[player_id]`
+  (duplicate sâu, cap 10, `_mark_state_dirty()`). **Không bao
+  giờ gửi vào peer -1 / peer chưa đăng ký nữa** — đó chính là
+  chỗ rơi gói trước đây.
+- `_flush_trade_pending(peer_id, player_id)` (mới): gọi cuối
+  `_rebind_after_hello` (sau khi gửi lại trade_offer đang chờ +
+  trade_offered + chat_history) — gửi lại từng thông báo còn nợ
+  rồi xóa hàng đợi của người đó. Mỗi thông báo chỉ gửi đúng 1
+  lần: gửi xong là xóa, hello lần sau không còn gì để gửi.
+- `_clean_trade_pending(raw)` (mới): lọc 1 hàng đợi từ file —
+  không phải Array thì trả []; chỉ giữ message có `type` thuộc
+  3 loại trên + `trade_id` không rỗng; `trade_completed` phải có
+  đủ `from_player_id` / `to_player_id` (để client
+  `_clean_trade` chấp nhận); message sai thì bỏ message đó, giữ
+  phần đúng; tối đa 10 / người.
+- Persist: `save_state()` thêm `"trade_pending"` (duplicate
+  sâu); `load_state()` nạp qua `_clean_trade_pending` (thiếu key
+  thì rỗng — **file v99 cũ không có key này vẫn nạp được**);
+  cap số người nợ ≤ `MAX_PLAYERS` (64). `data` trạng thái server
+  thêm `"trade_undelivered": _trade_pending.size()` (số người
+  đang nợ thông báo).
+- Ghi chú thiết kế: KHÔNG gửi lặp `trade_completed` từ
+  `trade_log` lúc hello lại — `ws_trades_applied` của client
+  chỉ giữ 50 id gần nhất nên gửi lặp có nguy cơ áp trùng khi
+  client đã áp rồi; hàng đợi `_trade_pending` là nguồn duy nhất
+  cho thông báo chưa giao (gửi 1 lần rồi xóa).
+
+### 121.3 Test mới + hồi quy — XONG
+
+- Test mới `tests/g4_r100_trade_completed_rebind_test.gd`
+  (kèm `.uid`, cổng 18800–18805, state
+  `/tmp/pxb-r100-state.json`, 5 phase, socket + server thật,
+  client A/B thô; viết ở lượt 18:45, chạy lại ở lượt 19:45):
+  **77/77 PASS ngay lần 1 — không sửa code sau test.**
+  (a) Unit cleaner: giữ đủ, lọc sai (sai type / thiếu trade_id
+  / completed thiếu from/to), cap 10; (b) B accept khi A offline
+  (chưa hello lại sau restart) → server xếp `trade_completed`
+  vào hàng đợi (không gửi vào peer -1), `data`
+  `trade_undelivered` = 1, A hello lại nhận đúng 1 lần, đúng
+  trade_id, không trùng, `trade_undelivered` về 0; (c) hàng đợi
+  persist qua restart: stop → state file giữ `trade_pending`
+  (player-a 1 thông báo `trade_completed` #2) → restart cổng
+  mới → A hello lại vẫn nhận được; restart lần 2 vẫn nhận đúng
+  1 lần; (d) đường decline tương tự: B từ chối khi A offline →
+  A hello lại nhận `trade_declined` #3 đúng 1 lần, lý do
+  `nguoi-nhan-tu-choi`, server trades rỗng; (e) file cũ (không
+  có `trade_pending`) nạp được: `trade_pending` rỗng,
+  `trade_log` vẫn 2 mục.
+- **Hồi quy đầy đủ: 5423 check, 0 FAIL** (lần sạch thứ 19;
+  +77 so với v99 = test mới r100; r99 21/21, r98 19/19, G1
+  419/419, G3 95/95, G1 playtest 14/14, không regression). Log
+  `hidden_files/regression-2026-11-28-1945-v100.log` (byte
+  trùng log hồi quy lượt 18:45 — cùng 5423 check, cùng kết quả;
+  lượt 18:45 đã chạy test r100 77/77 + hồi quy đầy đủ trước khi
+  lượt này chạy lại).
+
+### 121.4 Export — pck mới `e1030f47` (trùng byte bản 19:05)
+
+- `--check-only` 2 file sửa (`pxb_server.gd`, test r100) exit
+  0; `--headless --import` exit 0; scene Main 120 frame exit 0,
+  0 ERROR/warning.
+- Export web exit 0: pck **28.121.124 byte, SHA-256
+  `e1030f47…`** (trước `d3ed027f…`, +17.396 byte do code server
+  V100 + test r100; **trùng byte đúng bản export 19:05 của lượt
+  18:45 — export xác định**), wasm không đổi `fc74679e…`,
+  `GODOT_THREADS_ENABLED = false`; HTTP 200 đủ 4 file (cổng
+  8201: index.html / index.js / index.wasm / index.pck).
+
+### 121.5 Push main V100 — CHUẨN BỊ XONG, CHẠY Ở VÒNG NÀY
+
+- Sync-base verify ở vòng này (head vẫn `9b0864ece`):
+  `pxb_server.gd` — remote là bản duy nhất từng push của file
+  này (commit `89e9ceae`, 20/11, G4 bước 6, server v1: 288 dòng
+  / 10.466 byte; blob SHA `c2337e67…` đã đối chiếu — remote đúng
+  là bản đó, không phải fetch thiếu); local nay 2.686 dòng /
+  120.555 byte. **Lệch này là tích lũy thật, không phải xung
+  đột:** server đã đi qua V69–V99 (trade WS, sổ cái, đấu giá,
+  shop_buy, persistence, chat_history, rebind) mà không vòng nào
+  đẩy lại file server — vòng này đẩy luôn phần tích lũy đó lên
+  main cùng V100 (ghi rõ trong commit message); remote chỉ có 9
+  dòng không còn khớp nguyên văn (đã sửa/xóa trong lúc phát
+  triển), còn lại local chứa đủ nội dung remote + thêm mới; head
+  không đổi nên không có writer khác. 2 file test mới
+  (g4_r100 + `.uid`) vắng mặt trên remote (đã kiểm bằng
+  `get_file_contents` — trả lỗi không tồn tại); docs chỉ đổi ở
+  phần V100 (§121 + mục V100 roles-qc).
+- Push 5 file: `src/godot/server/pxb_server.gd`,
+  `src/godot/tests/g4_r100_trade_completed_rebind_test.gd`,
+  `src/godot/tests/g4_r100_trade_completed_rebind_test.gd.uid`,
+  `docs/godot-g4.md`, `docs/roles-qc.md`. Commit SHA ghi thêm
+  vào mục này sau khi push xong (thẻ duyệt + `list_commits`).
+- Deploy pck `e1030f47` lên gh-pages vẫn CHƯA CHẠY — chờ chủ
+  nói 'đẩy tiếp'. Live vẫn r41 pck `5f2a052f`; local đã tới
+  r100 (lệch 59 vòng).
+
+### 121.6 Việc tiếp theo — Vòng 101
+
+1. Auction chưa xong phần "tới tay người offline": `auction_closed`
+   không tới được tay người chơi đang offline (log không persist
+   — giới hạn đã ghi ở §105.2); áp mẫu hàng đợi `_trade_pending`
+   cho `auction_closed` khi có phiên đóng lúc bidder/seller
+   offline. Chủ chốt trần bonus chỉ số phụ (hiện KHÔNG kẹp
+   STAT_MAX).
+2. Deploy pck `e1030f47` lên gh-pages — CHƯA CHẠY, deploy vẫn chờ
+   chủ nói "đẩy tiếp". Live vẫn r41 pck `5f2a052f`; local đã tới
+   r100 (lệch 59 vòng).
+3. Rút ngắn khoảng lệch file server: `server_main.gd` và
+   `scripts/pxb_online.gd` cũng chưa được đẩy lại từ 20/11
+   (cùng gốc với `pxb_server.gd` ở §121.5) — vòng sau kiểm tra
+   từng file rồi đẩy phần đổi của nó lên main, không để tích lũy
+   âm thầm nữa.
