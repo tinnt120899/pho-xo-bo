@@ -12927,3 +12927,207 @@ gửi lại cho ai.
    của plan-34 hoặc retry như các plan khác đã làm).
 5. Trade/auction sau restart server (cần 2 client); chủ chốt
    trần bonus chỉ số phụ (hiện KHÔNG kẹp STAT_MAX).
+
+## §119 — Vòng 98: HUD refresh ngay khi tốt nghiệp + verify lại hold-sync + probe plan-34 — XONG (28/11 ~14:45–16:45 +07, cron 14:45)
+
+### 119.1 Sửa code — HUD refresh ngay khi tốt nghiệp
+
+- `main.gd` `_check_graduations()`: thêm cờ `changed` — tốt nghiệp
+  bằng chính (+EXP/Danh vọng) hoặc áp pending chỉ số phụ thành
+  công thì gọi lại `_update_hud()` ở cuối hàm (trước đây
+  `_advance_frame` gọi `_update_hud()` TRƯỚC `_check_graduations()`
+  nên Sáng vẫn 100 tới khi mở điện thoại — r97, ảnh 149/150).
+  Không có thay đổi thì không refresh thừa.
+- `main.gd` `_update_hud()`: lộ HUD ra `window.__pxb_hud` (chỉ web,
+  theo mẫu `__pxb_map`/`__pxb_tile`): `{day, frame, gold, exp,
+  substats}` để script browser-verify đọc số liệu thật thay vì chỉ
+  xem ảnh.
+
+### 119.2 Test headless mới — 19/19 PASS
+
+- `tests/g4_r98_hud_refresh_test.gd` (mới): HUD ban đầu Sáng 100 /
+  EXP 0; khóa ngắn → HUD Sáng 110 NGAY sau `_check_graduations()`
+  (không gọi `_update_hud()` tay, không mở điện thoại); khóa 2 →
+  120; pending cũ Ky +10 → HUD lên ngay, không toast mới; tốt
+  nghiệp Cao đẳng → HUD EXP 500 ngay + toast; không tốt nghiệp →
+  HUD không đổi.
+- Hồi quy đầy đủ: **5325 check, 0 FAIL** (lần sạch thứ 17;
+  +19 so với v97 = test mới r98).
+  Log `hidden_files/regression-2026-11-28-1445-v98.log`.
+
+### 119.3 Export — pck mới `668289c2`
+
+- Scene 120 frame exit 0, 0 ERROR. Export web exit 0: pck
+  **28.099.164 byte, SHA-256 `668289c2…`** (trước `5ba6fd53…`,
+  28.095.648), wasm không đổi `fc74679e…`,
+  `GODOT_THREADS_ENABLED = false`; HTTP 200 đủ 4 file (cổng 8199).
+
+### 119.4 Browser-verify r98 — HUD + HOLD-SYNC ĐỀU ĐÃ ĐÚNG, 62/63 BƯỚC
+
+- Script `hidden_files/pxb-browser-verify-r98.py` (venv
+  `/tmp/pxb-pw-venv`; server Godot thật cổng 8765, state mới
+  `/tmp/pxb-v98-state.json`; HTTP cổng 8199). 3 fix trong script:
+  (1) `bridge()` retry evaluate 3 lần; (2)
+  `ensure_phone_closed` bấm phím P TRƯỚC, chỉ bấm (360,903) khi
+  P thất bại; (3) đọc `window.__pxb_hud` sau ngày 4 (trước khi
+  mở điện thoại) + assert hold-sync trên state file server.
+- Đóng điện thoại bằng P ĐÃ ĐÚNG cả 3 lần (after-chat /
+  after-enroll / after-banthan, attempt=0 via P) — WS còn nối
+  suốt phiên (server log chỉ 1 lần + peer lúc vào, 1 lần - peer
+  lúc đóng trình duyệt); ledger KHÔNG đóng băng nữa:
+  `wallet-after-8-shifts` 2.340.000đ OK ngay lần đầu (r97 FAIL
+  money=0), `enroll-try1` 340.000đ OK ngay lần đầu.
+- **HUD SÁNG 110 NGAY SAU TỐT NGHIỆP ĐÃ XÁC MINH TRÊN TRÌNH
+  DUYỆT THẬT:** `hud-sang-110-before-phone` OK —
+  `__pxb_hud = {day: 4, frame: 'Sáng', gold: 340000, exp: 80,
+  substats: 'Kỷ 100 • Dũng 100 • Sáng 110 • An Yên 100'}` đọc
+  TRƯỚC khi mở điện thoại; ảnh 163 xác nhận bằng mắt: HUD
+  "Ngày 4 • Khung Sáng", "Ví: 340.000đ • EXP 80", "Sáng 110",
+  toast "Xong khóa ngắn hạn: Sáng +10".
+- **HOLD-SYNC LÊN SERVER ĐÃ XÁC MINH LẦN ĐẦU:**
+  `server-hold-sync` OK — state file
+  `holds[pid] = {stall_id: 'sap-cho-dau-moi', start_day: 1,
+  until_day: 8}` (r97 holds {} vì WS ngắt);
+  `ledger-alive-after-battle` 340.000đ OK.
+- Trận thắng 36/37, winner=A, panel giữa wrap 3 dòng + panel
+  dưới wrap 2 dòng vẫn đúng; 0 console error / 0 pageerror /
+  0 failed request (63 bước, 1 FAIL duy nhất: plan-34).
+- Phát hiện mới (không chặn): panel giữa ghi "Giữ sạp ...
+  đến ngày game 8" (đã neo theo ngày server) nhưng dòng
+  `_last_action` ở panel dưới ghi "đến ngày game 11" (cửa sổ
+  local chưa neo) — `_on_battle_finished` của scene chụp
+  `_last_action = result_text()` lúc trận xong, TRƯỚC khi Main
+  neo lại `battle["hold"]`; panel giữa đọc lại `battle["hold"]`
+  sau khi neo nên khác nhau. Việc V99: sau khi neo, cập nhật
+  lại `_last_action` cho khớp.
+
+### 119.5 Probe plan-34 — ĐÃ TÌM RA GỐC (lỗi thiết kế replay, KHÔNG phải lỗi game)
+
+- plan-34 trục trặc lần thứ 5 liên tiếp (r93 attack-miss; r95
+  trận xong trước khi tới lượt; r96b miss, 36/37; r97
+  no-battle-miss; r98 attack-miss) — luôn là lượt CUỐI CÙNG
+  của replay.
+- Đếm lại PLAN: plan-34 là `("ban-1", 13, [(376, 536)])` —
+  lượt ở **VÒNG 13**. Luật: `MAX_ROUNDS = 12`;
+  `_check_end()` (gọi sau mỗi hành động + mỗi tick 1s của đồng
+  hồ trận, `pxb_marketbattle.gd` §788) kết thúc trận ngay khi
+  `round > 12` → lượt vòng 13 chỉ tồn tại tới tick 1s tiếp
+  theo (≤ ~4,5s wall dưới SwiftShader). Script phải đợi lượt +
+  bấm + đọc bridge trong cửa sổ đó — đua với tick nên thua:
+  r98 click rơi vào lúc trận đã kết thúc (status FINISHED →
+  click không làm gì, không hp/acted) → "attack"-miss; r97
+  bridge đã đọc None/over → "no-battle"-miss; r95 trận xong
+  trước khi đợi → "battle-already-over". Ảnh 167: header
+  "Vòng 13/12 • Trận còn 1:32" — trận kết thúc theo giới hạn
+  vòng, không phải hết giờ 180s; `hpA=1 hpB=1` ở bước
+  battle-over là % SAU khi hồi đầy HP (không cho biết biên độ
+  thắng — thắng theo % HP lúc `_check_end` chạy).
+- Đã LOẠI TRỪ bằng số liệu: bridge transient (retry đổi kind
+  miss từ no-battle sang attack — đọc bridge đã ổn); đồng hồ
+  trận 180s (trận chỉ ~323s wall ≈ 70s game < 180s); WS ngắt
+  (hold-sync OK sau trận); né của Lục (đòn né vẫn set
+  `acted=true` nên script vẫn tính trúng).
+- Kết luận: game đúng luật của nó; PLAN replay thừa 1 lượt.
+  Sửa ở V99: bỏ plan-34 khỏi PLAN (dừng ở plan-33, vòng 12),
+  để trận kết thúc theo giới hạn vòng rồi assert winner theo
+  % HP; đồng thời log `attackable` + trạng thái lượt khi miss
+  để phân biệt "ngoài tầm" với "trận đã xong".
+
+### 119.6 Việc tiếp theo — Vòng 99
+
+1. Sửa PLAN replay: bỏ plan-34 (dừng ở plan-33 vòng 12); log
+   `attackable` khi miss.
+2. Đồng bộ dòng `_last_action` với hold đã neo theo ngày
+   server (panel giữa 8 vs panel dưới 11).
+3. Trade/auction sau restart server (cần 2 client — chưa làm,
+   dời từ V97/V98); chủ chốt trần bonus chỉ số phụ (hiện
+   KHÔNG kẹp STAT_MAX).
+4. Deploy pck `668289c2` lên gh-pages — CHƯA CHẠY, deploy vẫn
+   chờ chủ nói "đẩy tiếp". Live vẫn r41 pck `5f2a052f`; local
+   đã tới r98 (lệch 57 vòng).
+5. **Push main r98 CHƯA xong — kẹt chờ duyệt thẻ:** 2 lần gọi
+   `push-files` (09:13 + 09:15 UTC) đều hết hạn chờ duyệt, head
+   vẫn `8a767aef`; sync-base đã verify sẵn (main.gd + roles-qc.md
+   khớp blob SHA remote, godot-g4.md chỉ đổi ở `8a767aef`, 2 file
+   test mới vắng mặt trên remote), manifest
+   `hidden_files/pxb-push-main-r98-manifest` đã sẵn — lượt sau
+   push lại, KHÔNG đổi sync record khi chưa có SHA xác nhận.
+
+## §120 — Vòng 99: đồng bộ _last_action sau khi neo hold + bỏ plan-34 — XONG (28/11 ~17:45–19:15 +07, cron 17:45)
+
+### 120.1 Sửa code — _last_action đồng bộ với hold đã neo
+
+- `scripts/battle_scene.gd`: thêm `refresh_last_action()` — tính lại
+  `_last_action = result_text()` + `_bridge_dirty = true` +
+  `queue_redraw()`. Chỉ gọi khi trận đã xong và hold đã đổi.
+- `main.gd` `_on_battle_finished`: sau khi neo hold theo ngày server
+  (`battle_scene.battle["hold"] = anchored` +
+  `PxbMarketBattle.apply_hold_win`), gọi
+  `battle_scene.refresh_last_action()` để panel dưới khớp panel giữa
+  (panel giữa đọc `result_text()` trực tiếp nên tự thấy ngày mới,
+  panel dưới đọc `_last_action` đã chụp trước khi neo).
+
+### 120.2 Test headless mới — 21/21 PASS
+
+- `tests/g4_r99_last_action_sync_test.gd` (mới, kèm `.uid`
+  `uid://d07ohdtp25gyv`): tạo trận gameDay 4, giết hết đội B rồi gọi
+  `mb._check_end` → đội A thắng, hold local đến ngày 11,
+  `_last_action` chụp "ngày game 11". Neo hold theo ngày server 1 →
+  đến ngày 8: TRƯỚC refresh tái hiện đúng bug r98 (`last_action`
+  vẫn ngày 11 trong khi `result_text()` đã ngày 8); SAU
+  `refresh_last_action()` thì `last_action` = "ngày game 8", không
+  còn "ngày game 11", bằng `result_text()`. Check biên: refresh khi
+  chưa neo thì `last_action` không đổi nội dung; refresh trên scene
+  rỗng không crash, `result_text()` rỗng.
+- Hồi quy đầy đủ: **5346 check, 0 FAIL** (lần sạch thứ 18;
+  +21 so với v98 = test mới r99).
+  Log `hidden_files/regression-2026-11-28-1745-v99.log`.
+
+### 120.3 Export — pck mới `d3ed027f`
+
+- Scene 120 frame exit 0, 0 ERROR. Export web exit 0: pck
+  **28.103.728 byte, SHA-256 `d3ed027f…`** (trước `668289c2…`,
+  28.099.164), wasm không đổi `fc74679e…`,
+  `GODOT_THREADS_ENABLED = false`; HTTP 200 đủ 4 file (cổng 8200).
+  Lưu ý: export phải chạy từ `src/godot` với `../godot-build/index.html`
+  (chạy từ repo root lỗi "Target folder does not exist").
+
+### 120.4 Browser-verify r99 — REPLAY SẠCH ĐẦU TIÊN, 62/62 BƯỚC
+
+- Script `hidden_files/pxb-browser-verify-r99.py` (venv
+  `~/workspace/pxb-pw-venv`; server Godot thật cổng 8765, state mới
+  `/tmp/pxb-v99-state.json`; HTTP cổng 8200). 2 đổi trong script:
+  (1) PLAN còn 33 lượt / 36 click — bỏ plan-34 (lượt vòng 13, vượt
+  `MAX_ROUNDS=12`, xem §119.5); (2) `do_action_click` trả thêm chi
+  tiết miss (`attackable` + lượt + vòng + `over`) để phân biệt
+  "ngoài tầm" với "trận đã xong"; (3) bước mới `last-action-synced`
+  so ngày giữ sạp trong `last_action` với `result_text`.
+- **Replay sạch lần đầu: `landed=36 missed=0 skipped=0`** — r93–r98
+  đều miss đúng plan-34, nay không còn lượt vòng 13 để miss.
+- **`last-action-synced` OK: `last_action` ngày=8, `result_text`
+  ngày=8** — fix V99 đã xác minh trên trình duyệt thật (r98: panel
+  giữa ngày 8 vs panel dưới ngày 11).
+- Trận thắng winner=A, hold [1,8) trên server (`holds[pid]`
+  `sap-cho-dau-moi`, `until_day` 8); HUD Sáng 110 đọc trước khi mở
+  điện thoại; ledger 2.340.000đ sau 8 ca + 340.000đ sau đăng ký;
+  0 console error / 0 pageerror / 0 failed request (62 bước).
+  Ảnh 155–167 r99 + `console-r99.json` + `holds-r99.json`.
+
+### 120.5 Push main gộp r98+r99 — ĐANG CHẠY
+
+- Sync-base verify lại ở vòng này (head vẫn `8a767aef`):
+  battle_scene.gd chỉ khác phần thêm `refresh_last_action()`;
+  main.gd chỉ khác HUD r98 + lời gọi refresh r99; roles-qc.md chỉ
+  khác mục V98; 4 file test mới (g4_r98 + g4_r99, .gd) vắng mặt trên
+  remote; godot-g4.md không fetch được nguyên file do quá lớn
+  (output bị giữ lại) nhưng head không đổi nên không có divergence
+  từ writer khác. Manifest gộp: 8 file (xem §120.5 sau khi có SHA).
+
+### 120.6 Việc tiếp theo — Vòng 100
+
+1. Trade/auction sau restart server (cần 2 client — chưa làm, dời
+   từ V97/V98/V99); chủ chốt trần bonus chỉ số phụ (hiện KHÔNG kẹp
+   STAT_MAX).
+2. Deploy pck `d3ed027f` lên gh-pages — CHƯA CHẠY, deploy vẫn chờ
+   chủ nói "đẩy tiếp". Live vẫn r41 pck `5f2a052f`; local đã tới
+   r99 (lệch 58 vòng).

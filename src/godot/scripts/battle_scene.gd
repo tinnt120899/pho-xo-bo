@@ -138,6 +138,17 @@ func _on_battle_finished(_winner: String) -> void:
 	battle_finished.emit(_winner)
 
 
+## Vong 99: Main neo lai hold theo ngay server SAU khi scene chup
+## _last_action = result_text() (cua so local, vd den ngay 11) — dong
+## bo lai _last_action cho khop hold da neo (vd ngay 8) de panel duoi
+## khong lech panel giua (panel giua doc result_text() truc tiep nen
+## tu thay ngay moi). Chi goi khi tran da xong va hold da doi.
+func refresh_last_action() -> void:
+	_last_action = result_text()
+	_bridge_dirty = true
+	queue_redraw()
+
+
 ## --- Cầu nối trạng thái trận ra JS (Vòng 92) ---
 ## Bài học V91: replay mù 34 lượt không trúng đòn nào — click rơi
 ## vào lượt địch (đợi 3s sau Kết thúc lượt, trong khi AI cần 1,2s

@@ -548,8 +548,15 @@ func _advance_frame() -> void:
 # pending (dung hop dong PxbEducation: event tu ap pending); khoa
 # ngan han ap +10 chi so phu qua PxbStats (Vong 87) roi xoa pending.
 func _check_graduations() -> void:
+	# Vong 98: HUD phai refresh ngay khi tot nghiep — _advance_frame
+	# goi _update_hud() TRUOC _check_graduations() nen truoc day Sang
+	# van 100 toi khi mo dien thoai moi thay 110 (r97, anh 149/150).
+	# Moi thay doi (tot nghiep bang chinh / ap pending chi so phu)
+	# deu goi lai _update_hud() o cuoi ham nay.
+	var changed := false
 	var g := education.check_graduation()
 	if bool(g.get("graduated", false)):
+		changed = true
 		jobs.exp_total += int(g.get("exp", 0))
 		fame += int(g.get("fame", 0))
 		education.pending_exp = 0
@@ -560,13 +567,18 @@ func _check_graduations() -> void:
 			int(g.get("exp", 0)), int(g.get("fame", 0))])
 	var sc := education.check_short_course_graduation()
 	var applied := _apply_pending_stat_gains()
+	if not applied.is_empty():
+		changed = true
 	if bool(sc.get("graduated", false)):
+		changed = true
 		phonehub.notify(PxbPhoneHub.TAB_HOC_TAP)
 		if not applied.is_empty():
 			show_toast("Xong khóa ngắn hạn: " + _format_stat_gains(applied))
 		else:
 			show_toast("Xong khóa ngắn hạn: +%d %s (chờ áp vào chỉ số phụ)" % [
 				int(sc.get("gain", 0)), String(sc.get("sub_stat", ""))])
+	if changed:
+		_update_hud()
 
 
 # Vong 87: ap het +chi so phu dang cho (education.pending_stat_gain)
@@ -992,6 +1004,10 @@ func _on_battle_finished(_winner: String) -> void:
 			hold = anchored
 			battle_scene.battle["hold"] = anchored
 			PxbMarketBattle.apply_hold_win(battle_state, anchored)
+			# Vong 99: scene da chup _last_action = result_text() voi
+			# cua so local TRUOC khi neo — dong bo lai cho khop ngay
+			# server (panel duoi khong lech panel giua).
+			battle_scene.refresh_last_action()
 	if fame_gain > 0:
 		fame += fame_gain
 		_update_hud()
@@ -4055,6 +4071,14 @@ func _update_hud() -> void:
 	_fit_hud_substats()
 	var unread := phonehub.total_unread() if phonehub != null else 0
 	_phone_btn.text = ("Điện thoại (%d)" % unread) if unread > 0 else "Điện thoại (P)"
+	# Vong 98: lo HUD ra window.__pxb_hud de script browser-verify
+	# doc so lieu that (ngay/khung/vi/chi so phu) ma khong can mo
+	# dien thoai — theo mau window.__pxb_map/__pxb_tile. Chi tren web.
+	if OS.has_feature("web"):
+		JavaScriptBridge.eval("window.__pxb_hud = " + JSON.stringify({
+			"day": day, "frame": _frame_name(), "gold": jobs.gold,
+			"exp": jobs.exp_total,
+			"substats": String(_hud_substats.text)}))
 
 func show_toast(text: String) -> void:
 	_toast.text = text
