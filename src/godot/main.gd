@@ -2810,7 +2810,12 @@ func _on_ws_trade_offer_received(offer: Dictionary) -> void:
 	show_toast("Có đề nghị đổi đồ mới từ %s." % _ws_player_name(String(offer.get("from_player_id", ""))))
 
 
-func _on_ws_trade_offered_sent(_trade: Dictionary) -> void:
+func _on_ws_trade_offered_sent(trade: Dictionary) -> void:
+	# Vòng 103: người nhận đang offline (to_peer -1) thì báo rõ đề
+	# nghị đang chờ họ vào lại — trước đây im lặng nên người gửi
+	# tưởng đề nghị đã tới tay người nhận.
+	if int(trade.get("to_peer", -1)) < 0:
+		show_toast("Đã gửi đề nghị đổi đồ — %s đang offline, sẽ nhận khi vào lại." % _ws_player_name(String(trade.get("to_player_id", ""))))
 	_refresh_phone()
 
 

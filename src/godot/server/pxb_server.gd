@@ -1641,9 +1641,14 @@ func _trade_error(to_peer: int, reason: String) -> void:
 # Tạo 1 đề nghị đổi đồ. Kiểm tra theo thứ tự: người gửi đã hello,
 # có người nhận, không đổi với chính mình, mã món ≤64 ký tự, tiền
 # 0..100 tỉ (số nguyên), cho + muốn đều không rỗng, người gửi chưa
-# có đề nghị đang chờ, người nhận đang online. Đạt thì tạo
-# trade_id "trade-<ms>-<seq>", lưu vào trades, gửi trade_offer
-# cho người nhận + trade_offered cho người gửi.
+# có đề nghị đang chờ. Vòng 103: người nhận ĐANG OFFLINE vẫn tạo
+# được đề nghị (to_peer = -1) — đề nghị lưu trong trades (đã persist
+# trong state file) và _rebind_after_hello gửi lại trade_offer cho
+# người nhận lúc họ hello sau (vòng 83 đã gửi lại đề nghị đang mở);
+# trước đây từ chối "khong-tim-thay-nguoi-choi" nên đề nghị mất hẳn.
+# Đạt thì tạo trade_id "trade-<ms>-<seq>", lưu vào trades, gửi
+# trade_offer cho người nhận nếu đang online + trade_offered cho
+# người gửi (kèm to_peer để client biết người nhận có online không).
 func _handle_trade_offer(from_peer: int, msg: Dictionary) -> void:
 	if not players.has(from_peer):
 		dropped_packets += 1
@@ -1681,9 +1686,11 @@ func _handle_trade_offer(from_peer: int, msg: Dictionary) -> void:
 			_trade_error(from_peer, "da-co-de-nghi-cho")
 			return
 	var to_peer := _find_peer_by_player_id(to_player_id)
-	if to_peer < 0:
-		_trade_error(from_peer, "khong-tim-thay-nguoi-choi")
-		return
+	# Vòng 103: người nhận offline (to_peer -1) vẫn tạo được đề
+	# nghị — không từ chối nữa (trước đây "khong-tim-thay-nguoi-choi").
+	# Người nhận sẽ nhận trade_offer lúc hello lại (_rebind_after_hello
+	# gửi lại đề nghị đang mở); hủy/từ chối sau đó đã có hàng đợi
+	# _trade_pending (vòng 100) nên không mất tin.
 	# Vòng 73 (sổ cái): người gửi đã đồng bộ ledger thì chỉ cho
 	# gửi đề nghị trong khả năng còn lại — tiền cho <= money -
 	# reserved (tiền đang giữ hộ đấu giá không dùng được cho
@@ -1719,7 +1726,11 @@ func _handle_trade_offer(from_peer: int, msg: Dictionary) -> void:
 	_mark_state_dirty()
 	var offer_msg := {"type": "trade_offer"}
 	offer_msg.merge(trade)
-	_send_to(to_peer, offer_msg)
+	# Vòng 103: chỉ gửi trade_offer ngay khi người nhận đang online;
+	# offline thì đề nghị nằm trong trades, _rebind_after_hello gửi
+	# lại lúc họ hello sau. Người gửi luôn nhận trade_offered ngay.
+	if to_peer > 0:
+		_send_to(to_peer, offer_msg)
 	var offered_msg := {"type": "trade_offered"}
 	offered_msg.merge(trade)
 	_send_to(from_peer, offered_msg)

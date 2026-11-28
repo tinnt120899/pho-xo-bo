@@ -1232,6 +1232,10 @@ static func _clean_trade(msg: Dictionary) -> Dictionary:
 		"want_money": want_money,
 		"created_at_ms": _clean_ms(msg.get("created_at_ms", 0)),
 		"completed_at_ms": _clean_ms(msg.get("completed_at_ms", 0)),
+		# Vòng 103: giữ to_peer (-1 = người nhận đang offline lúc
+		# tạo đề nghị, sẽ nhận lúc hello lại) để Main báo đúng;
+		# trade_completed/log cũng có to_peer -1 sau khi nạp file.
+		"to_peer": int(msg.get("to_peer", -1)),
 	}
 	# Vòng 73 (sổ cái): trade_completed có thể kèm khối "ledger"
 	# server đã quyết toán — giữ khi hợp lệ, bỏ khối khi bẩn
@@ -1525,7 +1529,9 @@ func send_ws_chat(text: String) -> Dictionary:
 
 # Gửi 1 đề nghị đổi đồ cho người chơi khác (phải đã nối + đã
 # welcome). Trả {ok:true} khi đã gửi (server trả trade_offered
-# cho mình + trade_offer cho người nhận), {ok:false, reason} khi
+# cho mình + trade_offer cho người nhận — vòng 103: người nhận
+# đang offline thì trade_offer tới lúc họ hello lại, trade_offered
+# vẫn trả ngay kèm to_peer -1), {ok:false, reason} khi
 # chưa nối / sai luật ở client (đổi với chính mình, đề nghị
 # trống, tiền ngoài 0..100 tỉ, mã món quá dài, đã có đề nghị chờ).
 func send_ws_trade_offer(to_player_id: String, give_item_id: String,

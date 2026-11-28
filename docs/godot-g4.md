@@ -13532,7 +13532,12 @@ cancel: người gửi không nhận được `trade_declined` /
   `src/godot/scripts/pxb_online.gd`, `src/godot/main.gd`,
   `src/godot/tests/g4_r102_outbid_pending_test.gd`,
   `src/godot/tests/g4_r102_outbid_pending_test.gd.uid`,
-  `docs/godot-g4.md`, `docs/roles-qc.md` — CHỜ CHẠY Ở VÒNG NÀY.
+  `docs/godot-g4.md`, `docs/roles-qc.md` — **XONG, commit
+  `82cc3e6e9c038e5f8f80e10543214fce586c4ad4`** trên main, đã verify
+  bằng `list_commits`. Sync record
+  `pho-xo-bo.muse-github-snapshot-sync.json` đã ghi entry mới
+  (469 entries). (Dòng xác nhận này ghi sau push nên chỉ lên
+  remote ở lần push vòng sau, theo mẫu các vòng trước.)
 - Deploy pck `62c88666` lên gh-pages vẫn CHƯA CHẠY — chờ chủ nói
   'đẩy tiếp'. Live vẫn r41 pck `5f2a052f`; local đã tới r102 (lệch 61 vòng).
 
@@ -13545,6 +13550,126 @@ cancel: người gửi không nhận được `trade_declined` /
    thay .NET hay chờ máy có dotnet (xem `docs/opensource-engine.md` §3.4).
    Server Godot nay đã đủ trade/auction/shop/chat/persistence + 3 hàng đợi
    giao lại (trade/auction_closed/outbid) — quyết này càng lúc càng gần.
+3. Polish G4 §1.4 còn lại: camera zoom trận, tile riêng Map003–018
+   (đang PROVISIONAL), hiệu ứng đánh/ngã sạp; animation di chuyển/đánh
+   trong trận MarketBattle (đấu sĩ nhảy ô tức thì); chọn đội/vũ khí
+   trước trận; lưu giữ sạp + Danh vọng vào save.
+
+## 124. Vòng 103 — đề nghị trade tới tay người nhận dù offline (28/11 ~22:45–23:30)
+
+### 124.1 Chẩn đoán — đề nghị trade mất hẳn khi người nhận offline
+
+- `_handle_trade_offer` từ chối `khong-tim-thay-nguoi-choi` khi
+  `_find_peer_by_player_id(to_player_id) == -1` — người nhận offline
+  thì đề nghị KHÔNG ĐƯỢC TẠO, người gửi chỉ nhận lỗi, không có gì để
+  giao lại sau. Cùng họ lỗi với trade_completed trước vòng 100 (§121),
+  auction_closed trước vòng 101 (§122) và auction_outbid trước vòng
+  102 (§123): mọi tin quan trọng đều chỉ tới người đang online.
+- Server đã đủ điều kiện giao lại mà KHÔNG cần hàng đợi mới:
+  `trades` đã persist trong state file (`save_state`/`load_state` +
+  `_clean_trade_entry` chuẩn hóa peer về -1) và `_rebind_after_hello`
+  (vòng 83) đã gửi lại đề nghị đang mở (trade_offer + trade_offered)
+  cho người vừa hello — chỉ cần cho phép TẠO trade với `to_peer = -1`.
+  Hủy/từ chối sau đó đã có hàng đợi `_trade_pending` (vòng 100).
+
+### 124.2 Sửa — server + client + Main
+
+- Server `server/pxb_server.gd` (`_handle_trade_offer`): bỏ từ chối
+  khi người nhận offline — tạo trade với `to_peer = -1`, lưu vào
+  `trades` như thường; chỉ gửi `trade_offer` ngay khi `to_peer > 0`,
+  người gửi luôn nhận `trade_offered` ngay (kèm `to_peer` để client
+  biết người nhận có online không). Cập nhật comment đầu hàm (trước
+  đây ghi "người nhận đang online").
+- Client `scripts/pxb_online.gd`: `_clean_trade` giữ thêm `"to_peer"`
+  (int, thiếu → -1) — trước đây bỏ mất nên Main không phân biệt được
+  đề nghị tới người online hay offline; cập nhật doc
+  `send_ws_trade_offer` (trade_offer có thể tới lúc người nhận hello
+  lại, trade_offered vẫn trả ngay kèm to_peer -1).
+- Main `main.gd`: `_on_ws_trade_offered_sent` nay nhận trade — nếu
+  `to_peer < 0` thì toast "Đã gửi đề nghị đổi đồ — <tên> đang offline,
+  sẽ nhận khi vào lại." (trước đây im lặng nên người gửi tưởng đề nghị
+  đã tới tay người nhận); online thì giữ nguyên (không toast, chỉ
+  refresh điện thoại).
+
+### 124.3 Test mới + hồi quy — XONG
+
+- Test mới `tests/g4_r103_trade_offer_offline_test.gd`: **64/64 PASS**
+  (socket + server thật, 2 client A/B, cổng 18913–18914): `_clean_trade`
+  giữ to_peer 3 check (-1 / dương / thiếu → -1); B offline (chưa từng
+  hello): A gửi đề nghị 50.000đ đổi com-tam → A nhận trade_offered đúng
+  1 lần, to_peer -1, không trade_error, server giữ 1 trade to_peer -1,
+  data trade_pending 1; B hello lại → nhận trade_offer đúng 1 lần
+  (đúng trade_id/cho/muốn, ws_trade_offers 1), chờ 500ms không trùng;
+  restart → state file giữ trades, trade nạp về to_peer -1, A + B hello
+  lại nhận lại offered/offer đúng 1 lần, B chấp nhận → cả 2 nhận
+  trade_completed, sổ cái A 100.000 → 50.000, client A áp ví còn
+  50.000; online vẫn như cũ: A gửi cho B đang online → B nhận offer
+  ngay, offered to_peer > 0; B ngắt → server tự hủy đề nghị đang mở +
+  báo A (hành vi cũ `_cancel_trades_for_peer`); A gửi lại cho B offline
+  rồi hủy → trade_cancelled xếp hàng đợi, B hello lại nhận cancelled
+  đúng 1 lần, KHÔNG nhận offer, data trade_undelivered về 0.
+- 2 lỗi TEST đã sửa trong lúc viết (không phải lỗi code): (1) check
+  "trade trong file to_peer -1" sai — lúc stop, B đã hello ở phase 2
+  nên file giữ peer thật của B, về -1 là việc của `_clean_trade_entry`
+  lúc nạp (đã đổi check: file đúng cho/muốn + sau restart trade nạp về
+  to_peer -1); (2) B chấp nhận bị client chặn "khong-du-do-cho" vì
+  `_new_client_b` không cho B com-tam — B là bên nhận phải có món muốn
+  mới chấp nhận được (đã cho B com-tam x1).
+- 1 bẫy test đã tránh (không phải lỗi code): hủy đề nghị ngay khi peer
+  B vừa ngắt mà server chưa kịp xóa khỏi presence thì `_cancel_trades_for_peer`
+  chưa chạy — test đợi `_find_peer_by_player_id("player-b") == -1` rồi
+  mới cho A gửi lại/hủy (cùng họ bẫy outbid vòng 102).
+- Hồi quy đầy đủ **5621 check, 0 FAIL** (lần sạch thứ 22; log
+  `hidden_files/regression-2026-11-28-2245-v103.log`).
+
+### 124.4 Export — pck mới `f87ad6a6`
+
+- `--check-only` 4 file sửa exit 0; `--headless --import` exit 0;
+  scene Main 120 frame exit 0, 0 ERROR/warning.
+- Export web exit 0 (~12s): pck **28.166.696 byte, SHA-256 `f87ad6a6…`**
+  (trước `62c88666…`, +14.028 byte do code V103 + test r103 + sửa test
+  trade cũ), wasm không đổi `fc74679e…`,
+  `GODOT_THREADS_ENABLED = false`; HTTP 200 đủ 4 file (cổng 8204).
+- Không browser-verify (thay đổi server-side + client xử lý tin mới;
+  test headless đã dùng socket + server thật, như vòng 100/101/102).
+
+### 124.5 Push main V103 — CHUẨN BỊ XONG, CHẠY Ở VÒNG NÀY
+
+- Sync-base verify ở vòng này (head vẫn `82cc3e6e`, không có writer khác):
+  `pxb_server.gd` — remote = V102, local = remote +18/-7 (bỏ đúng
+  từ chối offline + comment cũ + `_send_to` vô điều kiện, không mất
+  dòng remote nào); `pxb_online.gd` — local = remote +7/-1 (chỉ
+  comment `send_ws_trade_offer` + giữ `to_peer` trong `_clean_trade`);
+  `main.gd` — local = remote +6/-1 (chỉ đổi signature +
+  toast khi `to_peer < 0`); `roles-qc.md` — local = remote +7/-1 (dòng
+  V102 "CHUẨN BỊ XONG" thành "XONG, commit 82cc3e6e" + mục V103);
+  `docs/godot-g4.md` — không fetch trực tiếp được (877 KB, MCP từ
+  chối vì quá lớn); kiểm bằng search_code: `124. Vòng 103` 0 kết quả
+  trên remote, `trade_offer_offline` 0 kết quả, local chỉ thêm §124
+  vào cuối file đã push ở V102; test r103 + `.uid` vắng mặt trên
+  remote (mới hoàn toàn); `g4_online_trade_test.gd` + `.uid` CŨNG
+  vắng mặt trên remote (chưa từng push — chỉ các test r-mới được push
+  ở các vòng trước; nay push kèm vì V103 đổi hành vi nó assert).
+- Push 9 file: `src/godot/server/pxb_server.gd`,
+  `src/godot/scripts/pxb_online.gd`, `src/godot/main.gd`,
+  `src/godot/tests/g4_r103_trade_offer_offline_test.gd`,
+  `src/godot/tests/g4_r103_trade_offer_offline_test.gd.uid`,
+  `src/godot/tests/g4_online_trade_test.gd`,
+  `src/godot/tests/g4_online_trade_test.gd.uid`,
+  `docs/godot-g4.md`, `docs/roles-qc.md` — TBD.
+- Deploy pck `f87ad6a6` lên gh-pages vẫn CHƯA CHẠY — chờ chủ nói
+  'đẩy tiếp'. Live vẫn r41 pck `5f2a052f`; local đã tới r103 (lệch 62 vòng).
+
+### 124.6 Việc tiếp theo — Vòng 104
+
+1. Deploy pck `f87ad6a6` lên gh-pages — CHƯA CHẠY, deploy vẫn chờ chủ nói
+   "đẩy tiếp". Live vẫn r41 pck `5f2a052f`; local đã tới r103 (lệch 62 vòng).
+2. G4 online thật: server `.NET 8` vẫn chưa build/chạy được trên VM
+   (không có dotnet SDK) — quyết dùng Godot headless dedicated server
+   thay .NET hay chờ máy có dotnet (xem `docs/opensource-engine.md` §3.4).
+   Server Godot nay đã đủ trade/auction/shop/chat/persistence + 4 đường
+   giao lại cho người offline (trade_completed/auction_closed/outbid +
+   trade_offer) — quyết này càng lúc càng gần.
 3. Polish G4 §1.4 còn lại: camera zoom trận, tile riêng Map003–018
    (đang PROVISIONAL), hiệu ứng đánh/ngã sạp; animation di chuyển/đánh
    trong trận MarketBattle (đấu sĩ nhảy ô tức thì); chọn đội/vũ khí
