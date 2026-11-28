@@ -173,6 +173,15 @@ extends Node
 ##       "item_id":"...","start_price":N,"current_bid":N,
 ##       "current_bidder_player_id":"...","ends_at_ms":N,
 ##       "created_at_ms":N}
+##     {"type":"auction_outbid","auction_id":"...","seller_player_id":"...",
+##       "item_id":"...","start_price":N,"current_bid":N,
+##       "current_bidder_player_id":"...","ends_at_ms":N,
+##       "created_at_ms":N,"old_bid":N,"old_bidder_player_id":"...",
+##       "new_bid":N,"new_bidder_player_id":"..."}  (vòng 102 — chỉ
+##       gửi cho người vừa bị vượt giá: online thì gửi ngay,
+##       offline thì xếp hàng đợi _outbid_pending, gửi lại lúc
+##       hello sau; broadcast auction_bid không tới được người
+##       offline nên không thay được tin này).
 ##     {"type":"auction_cancelled","auction_id":"...","reason":"..."}
 ##     {"type":"auction_closed","auction_id":"...","seller_player_id":"...",
 ##       "item_id":"...","winner_player_id":"...","hammer_price":N,
@@ -344,7 +353,10 @@ const DAY_LENGTH_MS := 1800000
 # trong luc server sap duoc dong + quyet toan o lan poll dau sau
 # restart — vong 101: auction_closed CON toi duoc tay nguoi choi
 # dang offline (hang doi _auction_pending, mau _trade_pending
-# vong 100: gui lai luc hello sau, persist qua restart).
+# vong 100: gui lai luc hello sau, persist qua restart). Vong
+# 102: auction_outbid CON toi duoc tay nguoi vua bi vuot gia
+# dang offline (hang doi _outbid_pending, mau _auction_pending
+# vong 101: broadcast auction_bid chi toi nguoi online).
 const STATE_VERSION := 1
 const STATE_FILE_DEFAULT := "user://pxb_server_state.json"
 const STATE_AUTOSAVE_MS := 5000
@@ -434,6 +446,16 @@ var _trade_pending: Dictionary = {}
 ## cu nhat bi day ra (giong _trade_pending vong 100).
 const AUCTION_PENDING_MAX := 10
 var _auction_pending: Dictionary = {}
+## Vong 102: thong bao auction_outbid chua giao duoc vi nguoi
+## vua bi vuot gia dang offline luc co gia cao hon (broadcast
+## auction_bid chi toi nguoi dang online): player_id -> Array cac
+## message dict (auction_outbid) de gui lai luc hello sau. PERSIST
+## qua restart (luu trong state file, xem save/load_state +
+## _clean_outbid_pending) — tin vuot gia van toi tay du server
+## restart truoc khi ben do hello lai. Toi da 10 thong bao /
+## nguoi choi, cu nhat bi day ra (giong _auction_pending vong 101).
+const OUTBID_PENDING_MAX := 10
+var _outbid_pending: Dictionary = {}
 ## auction_id -> {auction_id, seller_peer, seller_player_id,
 ## item_id, start_price, current_bid, current_bidder_player_id,
 ## created_at_ms, ends_at_ms}. Tối đa 1 phiên đang mở cho mỗi
@@ -564,6 +586,7 @@ func save_state() -> Dictionary:
 		"shop_log": shop_log.duplicate(true),
 		"trade_pending": _trade_pending.duplicate(true),
 		"auction_pending": _auction_pending.duplicate(true),
+		"outbid_pending": _outbid_pending.duplicate(true),
 	}
 	var text := JSON.stringify(state)
 	if text.is_empty():
@@ -720,6 +743,18 @@ func load_state() -> Dictionary:
 			var cleaned_ap := _clean_auction_pending((raw_apending as Dictionary)[pid])
 			if not cleaned_ap.is_empty():
 				new_auction_pending[String(pid)] = cleaned_ap
+	# Vong 102: nap hang doi thong bao auction_outbid chua giao
+	# (outbid_pending) — khoa cu khong co thi khoi dong sach
+	# (file v101 cu van nap duoc). Entry nao sai thi bo entry do.
+	var new_outbid_pending := {}
+	var raw_opending: Variant = raw.get("outbid_pending", {})
+	if raw_opending is Dictionary:
+		for pid in (raw_opending as Dictionary).keys():
+			if new_outbid_pending.size() >= MAX_PLAYERS:
+				break
+			var cleaned_op := _clean_outbid_pending((raw_opending as Dictionary)[pid])
+			if not cleaned_op.is_empty():
+				new_outbid_pending[String(pid)] = cleaned_op
 	_server_day_base = int(base_raw)
 	_server_day_started_ms = int(started_raw)
 	ledger = new_ledger
@@ -732,6 +767,7 @@ func load_state() -> Dictionary:
 	shop_log = new_shop_log
 	_trade_pending = new_pending
 	_auction_pending = new_auction_pending
+	_outbid_pending = new_outbid_pending
 	_state_dirty = false
 	_state_last_save_ms = _now_ms()
 	return {"ok": true, "loaded": true, "path": path}
@@ -877,6 +913,34 @@ func _clean_trade_pending(raw: Variant) -> Array:
 			if String(m.get("from_player_id", "")).strip_edges().is_empty() \
 					or String(m.get("to_player_id", "")).strip_edges().is_empty():
 				continue
+		out.append(m.duplicate(true))
+	return out
+
+
+# Vong 102: loc 1 danh sach thong bao auction_outbid cho giao
+# luc hello sau (tra [] neu sai — bo ca danh sach): moi muc la
+# Dictionary type "auction_outbid", auction_id khong rong,
+# old_bidder_player_id khong rong, old_bid int >= 0; cap
+# OUTBID_PENDING_MAX / nguoi, giu nguyen thu tu (moi nhat o cuoi).
+func _clean_outbid_pending(raw: Variant) -> Array:
+	if not (raw is Array):
+		return []
+	var out: Array = []
+	for item in raw:
+		if out.size() >= OUTBID_PENDING_MAX:
+			break
+		if not (item is Dictionary):
+			continue
+		var m: Dictionary = item
+		if String(m.get("type", "")) != "auction_outbid":
+			continue
+		if String(m.get("auction_id", "")).strip_edges().is_empty():
+			continue
+		if String(m.get("old_bidder_player_id", "")).strip_edges().is_empty():
+			continue
+		var old_bid: Variant = m.get("old_bid", -1)
+		if not (old_bid is int or old_bid is float) or int(old_bid) != old_bid or int(old_bid) < 0:
+			continue
 		out.append(m.duplicate(true))
 	return out
 
@@ -1247,6 +1311,7 @@ func data() -> Dictionary:
 		"trade_completed_count": trade_log.size(),
 		"trade_undelivered": _trade_pending.size(),
 		"auction_undelivered": _auction_pending.size(),
+		"outbid_undelivered": _outbid_pending.size(),
 		"auction_open": auctions.size(),
 		"auction_closed_count": auction_log.size(),
 		"shop_buy_count": shop_log.size(),
@@ -1448,13 +1513,17 @@ func _rebind_after_hello(peer_id: int, player_id: String) -> void:
 			"messages": chat_log.duplicate(true)})
 	_flush_trade_pending(peer_id, player_id)
 	_flush_auction_pending(peer_id, player_id)
+	_flush_outbid_pending(peer_id, player_id)
 	# Vong 100: hang doi _trade_pending da persist trong state
 	# file nen restart khong mat — chi can flush o day, khong
 	# gui lap trade_completed tu trade_log (gui lap co nguy co
 	# ap trung khi client da ap roi, vi ws_trades_applied chi
 	# giu 50 id gan nhat). Vong 101: hang doi _auction_pending
 	# cung vay — khong gui lap auction_closed tu auction_log
-	# (ws_auctions_applied cung chi giu 50 id gan nhat).
+	# (ws_auctions_applied cung chi giu 50 id gan nhat). Vong 102:
+	# hang doi _outbid_pending cung vay — khong gui lap
+	# auction_outbid tu broadcast auction_bid cu (broadcast da qua,
+	# nguoi offline khong nhan duoc nua).
 
 
 # Tìm peer_id đã đăng ký theo player_id; -1 = không có ai đó.
@@ -1524,6 +1593,39 @@ func _flush_auction_pending(peer_id: int, player_id: String) -> void:
 		return
 	var queued: Array = _auction_pending[player_id]
 	_auction_pending.erase(player_id)
+	for m in queued:
+		if m is Dictionary:
+			_send_to(peer_id, m)
+
+
+# Vong 102: gui 1 thong bao auction_outbid cho nguoi vua bi
+# vuot gia — neu dang online thi gui ngay, neu offline thi xep
+# vao hang doi _outbid_pending de gui lai luc hello sau (xem
+# _rebind_after_hello). Khong gui vao peer -1 / peer chua dang ky:
+# truoc day broadcast auction_bid chi toi nguoi online, ben
+# offline khong bao gio biet minh da bi vuot gia du tien giu ho
+# da duoc giai phong o server.
+func _send_outbid_notice(player_id: String, peer: int, msg: Dictionary) -> void:
+	if peer > 0 and players.has(peer):
+		_send_to(peer, msg)
+		return
+	if player_id.is_empty():
+		return
+	var queued: Array = _outbid_pending.get(player_id, [])
+	queued.append(msg.duplicate(true))
+	while queued.size() > OUTBID_PENDING_MAX:
+		queued.pop_front()
+	_outbid_pending[player_id] = queued
+	_mark_state_dirty()
+
+
+# Vong 102: gui lai cac thong bao auction_outbid con no cho
+# nguoi vua hello lai (hang doi RAM _outbid_pending).
+func _flush_outbid_pending(peer_id: int, player_id: String) -> void:
+	if not _outbid_pending.has(player_id):
+		return
+	var queued: Array = _outbid_pending[player_id]
+	_outbid_pending.erase(player_id)
 	for m in queued:
 		if m is Dictionary:
 			_send_to(peer_id, m)
@@ -2566,7 +2668,8 @@ func _handle_auction_create(from_peer: int, msg: Dictionary) -> void:
 # mở, người đấu không phải người bán, giá là số nguyên 1.000..
 # 100 tỉ, giá đầu tiên >= giá khởi điểm, các giá sau >= giá hiện
 # tại + 1.000đ. Đạt thì cập nhật current_bid / bidder, broadcast
-# auction_bid cho mọi người.
+# auction_bid cho mọi người + bao rieng cho nguoi vua bi vuot gia
+# (auction_outbid — vong 102, offline thi xep hang doi).
 func _handle_auction_bid(from_peer: int, msg: Dictionary) -> void:
 	if not players.has(from_peer):
 		dropped_packets += 1
@@ -2626,6 +2729,18 @@ func _handle_auction_bid(from_peer: int, msg: Dictionary) -> void:
 	var bid_msg := {"type": "auction_bid"}
 	bid_msg.merge(_auction_public(auction))
 	_broadcast(bid_msg)
+	# Vong 102: bao cho nguoi vua bi vuot gia — online thi gui
+	# ngay, offline thi xep hang doi _outbid_pending (xem
+	# _send_outbid_notice). Tu nang gia cua chinh minh thi khong
+	# bao (old_bidder == bidder_id).
+	if not old_bidder.is_empty() and old_bidder != bidder_id:
+		var outbid_msg := {"type": "auction_outbid"}
+		outbid_msg.merge(_auction_public(auction))
+		outbid_msg["old_bid"] = old_bid
+		outbid_msg["old_bidder_player_id"] = old_bidder
+		outbid_msg["new_bid"] = int(amount)
+		outbid_msg["new_bidder_player_id"] = bidder_id
+		_send_outbid_notice(old_bidder, _find_peer_by_player_id(old_bidder), outbid_msg)
 	auction_bid_placed.emit(_auction_public(auction))
 
 

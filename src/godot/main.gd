@@ -299,6 +299,9 @@ func _create_systems() -> void:
 	online.ws_trade_error.connect(_on_ws_trade_error)
 	online.ws_auction_created.connect(_on_ws_auction_created)
 	online.ws_auction_bid.connect(_on_ws_auction_bid)
+	# Vong 102: tin rieng khi minh bi vuot gia (ke ca nhan lai
+	# luc hello sau khi offline).
+	online.ws_auction_outbid.connect(_on_ws_auction_outbid)
 	online.ws_auction_list.connect(_on_ws_auction_list)
 	online.ws_auction_cancelled.connect(_on_ws_auction_cancelled)
 	online.ws_auction_error.connect(_on_ws_auction_error)
@@ -2841,6 +2844,21 @@ func _on_ws_auction_bid(_auction: Dictionary) -> void:
 		_refresh_phone()
 	else:
 		phonehub.notify(PxbPhoneHub.TAB_CHO)
+
+
+# Vong 102: minh vua bi vuot gia (chi server gui cho minh) —
+# bao ro gia cu / gia moi; tien giu ho cua gia cu da duoc server
+# giai phong, vi se cap nhat khi ack ledger_sync ve (client tu
+# sync o PxbOnline). Khong bao khi tin khong phai cho minh.
+func _on_ws_auction_outbid(auction: Dictionary, old_bid: int, old_bidder_player_id: String) -> void:
+	if old_bidder_player_id != online.ws_player_id:
+		return
+	var item_name := _trade_item_name(String(auction.get("item_id", "")))
+	if item_name.is_empty():
+		item_name = String(auction.get("item_id", ""))
+	show_toast("Bạn đã bị vượt giá %s — giá mới %sđ (giá cũ của bạn %sđ)." % [
+		item_name, _fmt_vnd(int(auction.get("current_bid", 0))), _fmt_vnd(old_bid)])
+	_refresh_phone()
 
 
 func _on_ws_auction_list(_auctions: Array) -> void:

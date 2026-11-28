@@ -13415,8 +13415,11 @@ cancel: người gửi không nhận được `trade_declined` /
   `src/godot/server/server_main.gd`, `src/godot/scripts/pxb_stats.gd`,
   `src/godot/tests/g4_r101_auction_pending_test.gd`,
   `src/godot/tests/g4_r101_auction_pending_test.gd.uid`,
-  `docs/godot-g4.md`, `docs/roles-qc.md` — **CHẠY Ở VÒNG NÀY**
-  (SHA sẽ theo lên remote ở lần push docs sau, như mẫu vòng trước).
+  `docs/godot-g4.md`, `docs/roles-qc.md` — **XONG, commit
+  `e72b0411767023280402e76d71dd5188dade0298`** trên main, đã verify
+  bằng `list_commits`. Sync record
+  `pho-xo-bo.muse-github-snapshot-sync.json` đã ghi entry mới
+  (468 entries).
 - Deploy pck `9cbd27f8` lên gh-pages vẫn CHƯA CHẠY — chờ chủ nói
   'đẩy tiếp'. Live vẫn r41 pck `5f2a052f`; local đã tới r101 (lệch 60 vòng).
 
@@ -13429,6 +13432,119 @@ cancel: người gửi không nhận được `trade_declined` /
    thay .NET hay chờ máy có dotnet (xem `docs/opensource-engine.md` §3.4).
    Server Godot nay đã đủ trade/auction/shop/chat/persistence — quyết
    này càng lúc càng gần.
+3. Polish G4 §1.4 còn lại: camera zoom trận, tile riêng Map003–018
+   (đang PROVISIONAL), hiệu ứng đánh/ngã sạp; animation di chuyển/đánh
+   trong trận MarketBattle (đấu sĩ nhảy ô tức thì); chọn đội/vũ khí
+   trước trận; lưu giữ sạp + Danh vọng vào save.
+
+## 123. Vòng 102 — auction_outbid tới tay người bị vượt giá dù offline + persist hàng đợi (28/11 ~21:45–22:30)
+
+### 123.1 Chẩn đoán — giới hạn đã ghi ở §105.2
+
+- `_handle_auction_bid` chỉ `_broadcast(auction_bid)` — broadcast chỉ tới
+  người đang online. Người đang dẫn đầu bị vượt giá trong lúc offline thì
+  KHÔNG BAO GIỜ biết mình đã bị vượt (tiền giữ hộ đã được server giải phóng
+  lặng lẽ, phiên vẫn mở, client chỉ biết khi tự xin `auction_list` — không
+  có tin nào đẩy tới). Cùng họ lỗi với trade_completed trước vòng 100
+  (§121) và auction_closed trước vòng 101 (§122).
+- Client đã đủ điều kiện nhận lại: `auction_bid` đã có sẵn đường sync
+  ledger khi mình liên quan (vòng 76 — `was_mine` → `send_ws_ledger_sync`),
+  tin outbid chỉ cần thêm: cập nhật phiên qua `_upsert_auction` + phát
+  signal riêng để Main báo toast. Gửi lại đúng 1 lần là an toàn (không áp
+  tiền/món, chỉ là tin báo).
+
+### 123.2 Sửa — server + client + Main
+
+- Server `server/pxb_server.gd` (mẫu `_auction_pending` vòng 101):
+  `var _outbid_pending: Dictionary = {}` + `const OUTBID_PENDING_MAX := 10`
+  (player_id -> Array message auction_outbid); `_send_outbid_notice`:
+  online thì gửi ngay, offline thì xếp hàng đợi (cap 10/người, deep
+  duplicate, `_mark_state_dirty`); `_flush_outbid_pending` gửi lại lúc
+  hello sau, xóa khỏi hàng đợi, gọi trong `_rebind_after_hello` ngay sau
+  `_flush_auction_pending`; `_clean_outbid_pending(raw)`: type phải là
+  "auction_outbid", auction_id + old_bidder_player_id không rỗng, old_bid
+  int >= 0, cap 10, giữ thứ tự; `save_state()` thêm `"outbid_pending"`;
+  `load_state()` nạp qua cleaner (file v101 cũ không có khóa này vẫn nạp
+  được); `data()` thêm `"outbid_undelivered": _outbid_pending.size()`.
+- `_handle_auction_bid`: sau `_broadcast(bid_msg)`, nếu old_bidder khác
+  rỗng và khác người vừa đấu thì gửi `{"type": "auction_outbid"} +
+  _auction_public(auction) + old_bid / old_bidder_player_id / new_bid /
+  new_bidder_player_id` qua `_send_outbid_notice(old_bidder,
+  _find_peer_by_player_id(old_bidder), ...)`. Tự nâng giá của chính mình
+  thì không báo (old_bidder == bidder_id).
+- Client `scripts/pxb_online.gd`: signal mới `ws_auction_outbid(auction,
+  old_bid, old_bidder_player_id)`; case `"auction_outbid"` trong
+  `_handle_ws_message`: `_clean_auction` + `_upsert_auction` như bid,
+  nếu mình là old_bidder thì `send_ws_ledger_sync()` ngay (reserved của
+  mình đã được giải phóng ở server — giống trường hợp was_mine ở
+  auction_bid), rồi phát signal kèm old_bid/old_bidder đọc từ msg gốc.
+- Main `main.gd`: nối `ws_auction_outbid` → `_on_ws_auction_outbid`:
+  chỉ báo khi old_bidder là mình, toast "Bạn đã bị vượt giá <món> — giá
+  mới Xđ (giá cũ của bạn Yđ)." + `_refresh_phone()`.
+
+### 123.3 Test mới + hồi quy — XONG
+
+- Test mới `tests/g4_r102_outbid_pending_test.gd`: **65/65 PASS** (socket +
+  server thật, 3 client S/A/B, cổng 18910–18912): cleaner 8 check; S mở
+  phiên com-tam 1.000.000/3600s, A đấu 1.000.000 dẫn đầu (server giữ hộ
+  1.000.000); A offline, B đấu 1.001.000 → server giải phóng giữ hộ A về 0,
+  giữ hộ B 1.001.000, `outbid_undelivered` 1, hàng đợi player-a đúng 1 tin
+  auction_outbid (old 1.000.000 / new 1.001.000); restart → state file giữ
+  outbid_pending, A hello lại nhận đúng 1 lần (giá cũ/mới đúng, phiên cập
+  nhật current_bid 1.001.000), hàng đợi về 0, chờ 1,5s không gửi lặp;
+  online: A đấu 1.002.000 → B nhận outbid ngay, hàng đợi 0; A tự nâng
+  1.003.000 → không ai nhận thêm outbid; file cũ v101 (không có khóa
+  outbid_pending) nạp được, phiên vẫn mở.
+- 1 bẫy test đã tránh (không phải lỗi code): B đấu ngay khi peer A vừa
+  ngắt mà server chưa kịp xóa khỏi presence thì tin outbid sẽ gửi vào peer
+  chết thay vì xếp hàng đợi — test đợi `_find_peer_by_player_id("player-a")
+  == -1` rồi mới cho B đấu. Cùng họ với bẫy white-box ends_at_ms ở vòng 101.
+- Hồi quy đầy đủ **5551 check, 0 FAIL** (lần sạch thứ 21; log
+  `hidden_files/regression-2026-11-28-2145-v102.log`).
+
+### 123.4 Export — pck mới `62c88666`
+
+- `--check-only` 3 file sửa exit 0; `--headless --import` exit 0;
+  scene Main 120 frame exit 0, 0 ERROR/warning.
+- Export web exit 0 (~45s): pck **28.152.668 byte, SHA-256 `62c88666…`**
+  (trước `9cbd27f8…`, +16.772 byte do code V102 + test r102),
+  wasm không đổi `fc74679e…`, `GODOT_THREADS_ENABLED = false`;
+  HTTP 200 đủ 4 file (cổng 8203).
+- Không browser-verify (thay đổi server-side + client xử lý tin mới;
+  test headless đã dùng socket + server thật, như vòng 100/101).
+
+### 123.5 Push main V102 — CHUẨN BỊ XONG, CHẠY Ở VÒNG NÀY
+
+- Sync-base verify ở vòng này (head vẫn `e72b0411`, không có writer khác):
+  `pxb_server.gd` — remote blob `b76c0077…` (V101), local = remote + đổi
+  V102 (chỉ 3 dòng comment cũ mở rộng + thêm mới, không mất dòng remote
+  nào); `pxb_online.gd` — remote blob `5b1dfa51…` (V93, khớp ghi chú vòng
+  101), local = remote + 22 dòng, 0 dòng mất; `main.gd` — remote blob
+  `62b962bb…` (V98+99), local = remote + 18 dòng, 0 dòng mất;
+  `roles-qc.md` — remote blob `d56895cc…`, local = remote + tách dòng
+  V101 làm 2 dòng (cùng nội dung, tách sau push V101) + mục V102;
+  `docs/godot-g4.md` — không fetch trực tiếp được (file 877 KB, MCP từ
+  chối vì quá lớn); kiểm bằng search_code: `outbid_pending` 0 kết quả
+  trên remote, `123. Vòng 102` không có trong godot-g4.md remote, local
+  chỉ thêm §123 vào cuối file đã push ở V101; test r102 + `.uid` vắng mặt
+  trên remote (mới hoàn toàn, `get_file_contents` trả không tồn tại).
+- Push 7 file: `src/godot/server/pxb_server.gd`,
+  `src/godot/scripts/pxb_online.gd`, `src/godot/main.gd`,
+  `src/godot/tests/g4_r102_outbid_pending_test.gd`,
+  `src/godot/tests/g4_r102_outbid_pending_test.gd.uid`,
+  `docs/godot-g4.md`, `docs/roles-qc.md` — CHỜ CHẠY Ở VÒNG NÀY.
+- Deploy pck `62c88666` lên gh-pages vẫn CHƯA CHẠY — chờ chủ nói
+  'đẩy tiếp'. Live vẫn r41 pck `5f2a052f`; local đã tới r102 (lệch 61 vòng).
+
+### 123.6 Việc tiếp theo — Vòng 103
+
+1. Deploy pck `62c88666` lên gh-pages — CHƯA CHẠY, deploy vẫn chờ chủ nói
+   "đẩy tiếp". Live vẫn r41 pck `5f2a052f`; local đã tới r102 (lệch 61 vòng).
+2. G4 online thật: server `.NET 8` vẫn chưa build/chạy được trên VM
+   (không có dotnet SDK) — quyết dùng Godot headless dedicated server
+   thay .NET hay chờ máy có dotnet (xem `docs/opensource-engine.md` §3.4).
+   Server Godot nay đã đủ trade/auction/shop/chat/persistence + 3 hàng đợi
+   giao lại (trade/auction_closed/outbid) — quyết này càng lúc càng gần.
 3. Polish G4 §1.4 còn lại: camera zoom trận, tile riêng Map003–018
    (đang PROVISIONAL), hiệu ứng đánh/ngã sạp; animation di chuyển/đánh
    trong trận MarketBattle (đấu sĩ nhảy ô tức thì); chọn đội/vũ khí

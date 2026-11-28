@@ -235,6 +235,11 @@ signal ws_trade_error(reason: String)
 signal ws_auction_created(auction: Dictionary)
 ## Phát khi có người đặt giá mới trong 1 phiên đang mở.
 signal ws_auction_bid(auction: Dictionary)
+## Phát khi mình vừa bị vượt giá trong 1 phiên đang mở (vòng
+## 102 — server gửi riêng cho người bị vượt giá; offline thì
+## nhận lại lúc hello sau từ hàng đợi _outbid_pending; kèm
+## old_bid / old_bidder_player_id, auction đã cập nhật giá mới).
+signal ws_auction_outbid(auction: Dictionary, old_bid: int, old_bidder_player_id: String)
 ## Phát khi 1 phiên đấu giá đã đóng (hết giờ — kèm "apply" khi
 ## mình là người bán / người thắng, xem apply_auction_closed).
 signal ws_auction_closed(auction: Dictionary)
@@ -1006,6 +1011,23 @@ func _handle_ws_message(msg: Dictionary) -> void:
 			if String(bid.get("current_bidder_player_id", "")) == ws_player_id or was_mine:
 				send_ws_ledger_sync()
 			ws_auction_bid.emit(bid)
+		"auction_outbid":
+			# Vong 102: tin rieng cho nguoi vua bi vuot gia —
+			# server chi gui cho old_bidder (online gui ngay,
+			# offline gui lai luc hello sau). Cap nhat phien
+			# nhu auction_bid + phat signal kem gia cu. Minh
+			# la old_bidder nen reserved cua minh da duoc giai
+			# phong o server — sync ngay de lay ack moi (giong
+			# truong hop was_mine o auction_bid).
+			var outbid := _clean_auction(msg)
+			if outbid.is_empty():
+				return
+			_upsert_auction(ws_auctions, outbid)
+			if String(msg.get("old_bidder_player_id", "")) == ws_player_id:
+				send_ws_ledger_sync()
+			ws_auction_outbid.emit(outbid,
+				_clean_money(msg.get("old_bid", 0)),
+				String(msg.get("old_bidder_player_id", "")))
 		"auction_cancelled":
 			var acid := String(msg.get("auction_id", ""))
 			if acid.is_empty():
